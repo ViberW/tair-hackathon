@@ -18,7 +18,7 @@ import java.util.concurrent.locks.LockSupport;
  * @apiNote 这个对象需要进行释放, 否则定时任务的线程池不断持有
  * @since 2022/2/22 16:01
  */
-public class TairCountDownLatch {
+public class TairCountDownLatch extends AbstractLifeCycle {
 
     private static final String KEY_PREFIX = "_hackathon:countdown:";
     private static final String PUBSUB_PREFIX = "_pubsub:countdown:";
@@ -32,6 +32,7 @@ public class TairCountDownLatch {
     private BlockingQueue<WaitNode> waitQueue = new LinkedBlockingQueue<>();
     private AtomicBoolean release = new AtomicBoolean(false);
     private volatile Thread thread;
+    private JedisPubSub pubSub;
 
     public TairCountDownLatch(Jedis jedis, String key, int count) {
         this.jedis = jedis;
@@ -39,17 +40,13 @@ public class TairCountDownLatch {
         this.key = KEY_PREFIX + key;
         this.pubsubChannel = PUBSUB_PREFIX + key;
         this.maxCount = count;
-        //直接写入到redis中去
-        initCountDown();
-        jedis.subscribe(new JedisPubSub() {
+        this.pubSub = new JedisPubSub() {
             @Override
             public void onMessage(String channel, String message) {
                 releaseThread();
             }
-        });
-        //定时任务做一个校验处理
-        GlobalExecutor.schedule().schedule(this::releaseOrAdd,
-                3, TimeUnit.MILLISECONDS);
+        };
+        start();
     }
 
     private void releaseOrAdd() {
@@ -70,13 +67,6 @@ public class TairCountDownLatch {
             }
         }
     }
-
-    private void initCountDown() {
-        ExsetParams params = new ExsetParams();
-        params.nx(); //不存在时才插入
-        tairString.exset(key, String.valueOf(maxCount), params);
-    }
-
 
     public void countDown() {
         if (tryRelease(1) == 0) {
@@ -106,6 +96,24 @@ public class TairCountDownLatch {
             }
             throw e;
         }
+    }
+
+    @Override
+    protected void doStart() {
+        //直接写入到redis中去
+        ExsetParams params = new ExsetParams();
+        params.nx(); //不存在时才插入
+        tairString.exset(key, String.valueOf(maxCount), params);
+        //订阅
+        jedis.subscribe(pubSub, pubsubChannel);
+        //定时任务做一个校验处理
+        GlobalExecutor.schedule().schedule(this::releaseOrAdd,
+                3, TimeUnit.MILLISECONDS);
+    }
+
+    @Override
+    protected void doStop() {
+        pubSub.unsubscribe(pubsubChannel);
     }
 
     static class WaitNode {

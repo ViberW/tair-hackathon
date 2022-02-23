@@ -14,10 +14,10 @@ import java.util.concurrent.locks.ReentrantLock;
 /**
  * @author Viber
  * @version 1.0
- * @apiNote
+ * @apiNote 这里都是非公平的, 若是想要公平, 则需要使用redis-list保存
  * @since 2022/2/22 15:28
  */
-public class TairSemaphore {
+public class TairSemaphore extends AbstractLifeCycle {
 
     private static final String KEY_PREFIX = "_hackathon:semaphore:";
     private static final String PUBSUB_PREFIX = "_pubsub:semaphore:";
@@ -36,22 +36,37 @@ public class TairSemaphore {
     private AtomicBoolean running = new AtomicBoolean(false);
     //尝试通过反射获取到对应的Queue的Lock
     private final ReentrantLock putLock;
+    private JedisPubSub pubSub;
+    //缓存存在时间, 0代表永久
+    private int timeSecond;
 
     public TairSemaphore(Jedis jedis, String key, int permits) {
+        this(jedis, key, permits, 0);
+    }
+
+    /**
+     * @param jedis      jedis
+     * @param key        保存的key后缀: KEY_PREFIX+key
+     * @param permits    信号量
+     * @param timeSecond 默认的存在时间 若为0时则永久存在
+     */
+    public TairSemaphore(Jedis jedis, String key, int permits, int timeSecond) {
         this.jedis = jedis;
         this.tairString = new TairString(jedis);
         this.key = KEY_PREFIX + key;
         this.pubsubChannel = PUBSUB_PREFIX + key;
         this.maxPermits = permits;
+        this.timeSecond = timeSecond;
         //监听pub/sub消息, 获取到消息则将头部的消息取出,并进行处理, 变更状态有变化, 通过cas进行变更通知, 唤醒第一个线程
-        jedis.subscribe(new JedisPubSub() {
+        this.pubSub = new JedisPubSub() {
             @Override
             public void onMessage(String channel, String message) {
                 notifyNode();
             }
-        });
+        };
         //获取到queue内部的lock
         this.putLock = QueueUtil.lockByQueue(waitQueue);
+        start();
         //todo 唯一有个难处理的点就是 若是系统非正常关闭, 导致没有释放掉, 那么permit该如何处理? 感觉这种就像是一种策略吧
     }
 
@@ -135,6 +150,9 @@ public class TairSemaphore {
         try {
             ExincrbyParams params = new ExincrbyParams();
             params.min(0);
+            if (timeSecond > 0) {
+                params.ex(timeSecond);
+            }
             tairString.exincrBy(key, -permits, params);
             return true;
         } catch (Exception e) {
@@ -149,6 +167,9 @@ public class TairSemaphore {
         try {
             ExincrbyParams params = new ExincrbyParams();
             params.max(maxPermits);
+            if (timeSecond > 0) {
+                params.ex(timeSecond);
+            }
             tairString.exincrBy(key, permits, params);
             return true;
         } catch (Exception e) {
@@ -157,6 +178,16 @@ public class TairSemaphore {
             }
             throw e;
         }
+    }
+
+    @Override
+    protected void doStart() {
+        jedis.subscribe(pubSub, pubsubChannel);
+    }
+
+    @Override
+    protected void doStop() {
+        pubSub.unsubscribe(pubsubChannel);
     }
 
     static class WaitNode {
