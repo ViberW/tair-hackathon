@@ -1,13 +1,12 @@
-package com.aliware.tianchi;
+package com.aliware.tianchi.countdownlatch;
 
+import com.aliware.tianchi.common.GlobalExecutor;
 import com.aliyun.tair.tairstring.TairString;
 import com.aliyun.tair.tairstring.params.ExincrbyParams;
 import com.aliyun.tair.tairstring.params.ExsetParams;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPubSub;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
@@ -18,7 +17,7 @@ import java.util.concurrent.locks.LockSupport;
  * @apiNote 这个对象需要进行释放, 否则定时任务的线程池不断持有
  * @since 2022/2/22 16:01
  */
-public class TairCountDownLatch extends AbstractLifeCycle {
+public class TairCountDownLatch {
 
     private static final String KEY_PREFIX = "_hackathon:countdown:";
     private static final String PUBSUB_PREFIX = "_pubsub:countdown:";
@@ -29,7 +28,6 @@ public class TairCountDownLatch extends AbstractLifeCycle {
     private final String pubsubChannel;
     private final int maxCount;
     //使用一个本地的queue
-    private BlockingQueue<WaitNode> waitQueue = new LinkedBlockingQueue<>();
     private AtomicBoolean release = new AtomicBoolean(false);
     private volatile Thread thread;
     private JedisPubSub pubSub;
@@ -46,25 +44,35 @@ public class TairCountDownLatch extends AbstractLifeCycle {
                 releaseThread();
             }
         };
-        start();
+        //订阅
+        jedis.subscribe(pubSub, pubsubChannel);
+        //直接写入到redis中去
+        ExsetParams params = new ExsetParams();
+        params.nx(); //不存在时才插入
+        tairString.exset(key, String.valueOf(maxCount), params);
+
+        releaseUntil();
     }
 
-    private void releaseOrAdd() {
+    /**
+     * 开启定时任务, 防止消息通知没有接收到
+     */
+    private void releaseUntil() {
         String s = jedis.get(key);
         if (null == s || "0".equals(s)) {
             releaseThread();
         } else {
-            GlobalExecutor.schedule().schedule(this::releaseOrAdd,
-                    3, TimeUnit.MILLISECONDS);
+            GlobalExecutor.schedule().schedule(this::releaseUntil, 500, TimeUnit.MILLISECONDS);
         }
     }
 
     private void releaseThread() {
-        release.set(true);
-        if (null != thread) {
-            if (release.compareAndSet(false, true)) {
+        if (release.compareAndSet(false, true)) {
+            if (null != thread) {
                 LockSupport.unpark(thread);
             }
+            pubSub.unsubscribe(pubsubChannel);
+            jedis.del(key);
         }
     }
 
@@ -79,10 +87,25 @@ public class TairCountDownLatch extends AbstractLifeCycle {
     }
 
     public void await() {
-        this.thread = Thread.currentThread();
         while (!release.get()) {
+            this.thread = Thread.currentThread();
             LockSupport.park();
         }
+    }
+
+    public boolean await(long timeout, TimeUnit unit) {
+        long nanosTimeout = unit.toNanos(timeout);
+        long deadline = System.nanoTime() + nanosTimeout;
+        while (!release.get()) {
+            this.thread = Thread.currentThread();
+            nanosTimeout = deadline - System.nanoTime();
+            if (nanosTimeout <= 0) {
+                return false;
+            } else if (nanosTimeout > 1000L) {//spinForTimeoutThreshold
+                LockSupport.park(nanosTimeout);
+            }
+        }
+        return true;
     }
 
     private Long tryRelease(int permits) {
@@ -95,32 +118,6 @@ public class TairCountDownLatch extends AbstractLifeCycle {
                 return 0L;
             }
             throw e;
-        }
-    }
-
-    @Override
-    protected void doStart() {
-        //直接写入到redis中去
-        ExsetParams params = new ExsetParams();
-        params.nx(); //不存在时才插入
-        tairString.exset(key, String.valueOf(maxCount), params);
-        //订阅
-        jedis.subscribe(pubSub, pubsubChannel);
-        //定时任务做一个校验处理
-        GlobalExecutor.schedule().schedule(this::releaseOrAdd,
-                3, TimeUnit.MILLISECONDS);
-    }
-
-    @Override
-    protected void doStop() {
-        pubSub.unsubscribe(pubsubChannel);
-    }
-
-    static class WaitNode {
-        private Thread thread;
-
-        public WaitNode(Thread thread) {
-            this.thread = thread;
         }
     }
 

@@ -1,4 +1,4 @@
-package com.aliware.tianchi;
+package com.aliware.tianchi.semaphore;
 
 import com.aliyun.tair.tairstring.TairString;
 import com.aliyun.tair.tairstring.params.ExincrbyParams;
@@ -6,10 +6,8 @@ import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPubSub;
 
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @author Viber
@@ -17,7 +15,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * @apiNote 这里都是非公平的, 若是想要公平, 则需要使用redis-list保存
  * @since 2022/2/22 15:28
  */
-public class TairSemaphore extends AbstractLifeCycle {
+public class TairSemaphore  {
 
     private static final String KEY_PREFIX = "_hackathon:semaphore:";
     private static final String PUBSUB_PREFIX = "_pubsub:semaphore:";
@@ -29,13 +27,8 @@ public class TairSemaphore extends AbstractLifeCycle {
     private final String pubsubChannel;
     //最大申请量
     private final int maxPermits;
-    //线程池的检测时长
-    private long schedule_interval = 3;
     //使用一个本地的queue
     private LinkedBlockingQueue<WaitNode> waitQueue = new LinkedBlockingQueue<>();
-    private AtomicBoolean running = new AtomicBoolean(false);
-    //尝试通过反射获取到对应的Queue的Lock
-    private final ReentrantLock putLock;
     private JedisPubSub pubSub;
     //缓存存在时间, 0代表永久
     private int timeSecond;
@@ -64,10 +57,12 @@ public class TairSemaphore extends AbstractLifeCycle {
                 notifyNode();
             }
         };
-        //获取到queue内部的lock
-        this.putLock = QueueUtil.lockByQueue(waitQueue);
-        start();
-        //todo 唯一有个难处理的点就是 若是系统非正常关闭, 导致没有释放掉, 那么permit该如何处理? 感觉这种就像是一种策略吧
+        jedis.subscribe(pubSub, pubsubChannel);
+        //todo 唯一的难点就是, 如何限制等待的时间. 重新构建一个索引段,用于代替刚才的限制
+        // 那么permit该如何处理? 感觉这种就像是一种策略吧
+        //todo 注册节点的信息, 并把它放入到列表中.
+        //todo 注册看门狗,持续保持节点数据存在
+        //pubSub.unsubscribe(pubsubChannel);
     }
 
     private void notifyNode() {
@@ -87,37 +82,9 @@ public class TairSemaphore extends AbstractLifeCycle {
         }
     }
 
-    private void notifyOrAdd() {
-        this.notifyNode();
-        if (!waitQueue.isEmpty()) {
-            GlobalExecutor.schedule().schedule(this::notifyOrAdd, schedule_interval, TimeUnit.MILLISECONDS);
-        } else {
-            putLock.lock();//先一步阻止线程进入queue
-            try {
-                if (waitQueue.isEmpty()) {//若是节点为空, 则尝试将running设置为false
-                    running.compareAndSet(true, false);
-                }
-            } finally {
-                putLock.unlock();
-            }
-        }
-    }
-
-    /**
-     * 判断是否需要添加检测任务
-     */
-    private void runningStamp() {
-        if (!running.get()) {
-            if (running.compareAndSet(false, true)) {
-                GlobalExecutor.schedule().schedule(this::notifyOrAdd, schedule_interval, TimeUnit.MILLISECONDS);
-            }
-        }
-    }
-
     public void acquire(int permits) {
         if (!tryAcquire(permits)) {
             waitQueue.offer(new WaitNode(Thread.currentThread()));
-            runningStamp();
             for (; ; ) {
                 WaitNode head = waitQueue.peek();
                 if (head != null && head.thread == Thread.currentThread()) {
@@ -139,6 +106,9 @@ public class TairSemaphore extends AbstractLifeCycle {
             try {
                 jedis.publish(pubsubChannel, "1");
             } catch (Exception e) {
+                if (e.getMessage().contains("increment or decrement would overflow")) {
+                    return true;
+                }
                 e.printStackTrace();
             }
             return true;
@@ -178,16 +148,6 @@ public class TairSemaphore extends AbstractLifeCycle {
             }
             throw e;
         }
-    }
-
-    @Override
-    protected void doStart() {
-        jedis.subscribe(pubSub, pubsubChannel);
-    }
-
-    @Override
-    protected void doStop() {
-        pubSub.unsubscribe(pubsubChannel);
     }
 
     static class WaitNode {

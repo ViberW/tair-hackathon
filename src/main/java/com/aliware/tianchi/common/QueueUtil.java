@@ -1,4 +1,4 @@
-package com.aliware.tianchi;
+package com.aliware.tianchi.common;
 
 import java.lang.reflect.Field;
 import java.util.concurrent.BlockingQueue;

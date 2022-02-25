@@ -1,4 +1,4 @@
-package com.aliware.tianchi;
+package com.aliware.tianchi.common;
 
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
