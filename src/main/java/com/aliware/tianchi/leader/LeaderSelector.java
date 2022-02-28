@@ -13,7 +13,6 @@ import redis.clients.jedis.Protocol;
 import redis.clients.jedis.util.SafeEncoder;
 
 import java.util.List;
-import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
@@ -163,7 +162,7 @@ public class LeaderSelector extends AbstractLifeCycle {
     private void ticketKeepalive() {
         GlobalExecutor.schedule().scheduleWithFixedDelay(() -> {
             if (isStart()) {
-                //tairHash.exhexpire(key, String.valueOf(nodeId), sessionTimeout);
+//                tairHash.exhexpire(key, String.valueOf(nodeId), sessionTimeout);
                 Boolean exhexpire = exhexpire(key, String.valueOf(nodeId), sessionTimeout, nodeVersion);
                 if (Boolean.TRUE.equals(exhexpire)) {
                     //更新当前节点的版本号
@@ -181,8 +180,8 @@ public class LeaderSelector extends AbstractLifeCycle {
     /**
      * 由于version的参数并未在1.9.0版本开放, 所以只能手动添加version的设置了
      *
-     * @param key hashkey
-     * @param field hashfield
+     * @param key     hashkey
+     * @param field   hashfield
      * @param seconds ttl时间
      * @param version 当前的版本
      * @return
