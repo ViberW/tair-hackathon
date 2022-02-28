@@ -12,7 +12,17 @@ public class TairExample {
     protected static final String HOST = "127.0.0.1";
     protected static final int PORT = 6379;
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         Jedis jedis = new Jedis(HOST, PORT, 60 * 1000);
+        testTairCountDownLatch();
+        testTairSemaphore();
+    }
+
+    private static void testTairCountDownLatch() {
+
+    }
+
+    private static void testTairSemaphore() {
+
     }
 }

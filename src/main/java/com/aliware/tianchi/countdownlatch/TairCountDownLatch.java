@@ -50,7 +50,6 @@ public class TairCountDownLatch {
         ExsetParams params = new ExsetParams();
         params.nx(); //不存在时才插入
         tairString.exset(key, String.valueOf(maxCount), params);
-
         releaseUntil();
     }
 

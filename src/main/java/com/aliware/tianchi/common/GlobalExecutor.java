@@ -1,9 +1,6 @@
 package com.aliware.tianchi.common;
 
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 /**
  * @author Viber
@@ -21,17 +18,17 @@ public class GlobalExecutor {
         return SingletonHolder.SINGLETON.scheduledExecutor;
     }
 
-    public static ThreadPoolExecutor executor() {
-        return SingletonHolder.SINGLETON.executor;
+    public static ExecutorService singleExecutor() {
+        return SingletonHolder.SINGLETON.singleExecutor;
     }
 
-    private final ThreadPoolExecutor executor;
+    private final ExecutorService singleExecutor;
     private final ScheduledThreadPoolExecutor scheduledExecutor;
 
     private GlobalExecutor() {
         int thread = Runtime.getRuntime().availableProcessors();
-        this.executor = new ThreadPoolExecutor(thread, thread, 0, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(), new NamedThreadFactory("global-executor-"));
+        this.singleExecutor = Executors.newSingleThreadExecutor(
+                new NamedThreadFactory("global-single-executor-"));
         this.scheduledExecutor = new ScheduledThreadPoolExecutor(thread,
                 new NamedThreadFactory("global-schedule-"));
     }
