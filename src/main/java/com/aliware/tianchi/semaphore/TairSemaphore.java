@@ -149,7 +149,6 @@ public class TairSemaphore extends AbstractLifeCycle {
                 clearRebuild(ttl);
             }
         };
-
     }
 
     @Override
@@ -164,10 +163,19 @@ public class TairSemaphore extends AbstractLifeCycle {
         selector.unRegisterListener(listener);
     }
 
+    private void startTsCalculate() {
+        GlobalExecutor.schedule().schedule(() -> {
+            if (isStart()) {
+                this.tsCalculate();
+                startTsCalculate();
+            }
+        }, 10, TimeUnit.SECONDS);
+    }
+
     /**
      * 开启定时任务的计算rebuildTimeout
      */
-    private void startTsCalculate() {
+    private void tsCalculate() {
         long current = System.currentTimeMillis();
         long toTs = current - (current % tsInterval);
         //近10s的变化
