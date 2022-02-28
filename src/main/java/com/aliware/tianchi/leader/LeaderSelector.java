@@ -181,10 +181,10 @@ public class LeaderSelector extends AbstractLifeCycle {
     /**
      * 由于version的参数并未在1.9.0版本开放, 所以只能手动添加version的设置了
      *
-     * @param key
-     * @param field
-     * @param seconds
-     * @param version
+     * @param key hashkey
+     * @param field hashfield
+     * @param seconds ttl时间
+     * @param version 当前的版本
      * @return
      */
     @SuppressWarnings("all")
