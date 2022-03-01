@@ -8,10 +8,15 @@ import java.util.concurrent.*;
  * @apiNote 全局线程池
  * @since 2022/2/18 15:59
  */
-public class GlobalExecutor {
+public class GlobalExecutor extends AbstractLifeCycle {
+
 
     private static class SingletonHolder {
         private static final GlobalExecutor SINGLETON = new GlobalExecutor();
+    }
+
+    public static GlobalExecutor instance() {
+        return SingletonHolder.SINGLETON;
     }
 
     public static ScheduledThreadPoolExecutor schedule() {
@@ -33,4 +38,14 @@ public class GlobalExecutor {
                 new NamedThreadFactory("global-schedule-"));
     }
 
+    @Override
+    protected void doStart() {
+
+    }
+
+    @Override
+    protected void doStop() {
+        singleExecutor.shutdownNow();
+        scheduledExecutor.shutdownNow();
+    }
 }

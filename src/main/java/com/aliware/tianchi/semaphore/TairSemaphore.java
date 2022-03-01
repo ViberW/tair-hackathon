@@ -49,7 +49,6 @@ public class TairSemaphore extends AbstractLifeCycle {
     private static final ThreadLocal<Long> BEGIN_TIME_LOCAL = new ThreadLocal<>();
     //通知每个节点 尝试去争抢
     private final JedisPool jedisPool;
-    private final TairStringPipeline tairStringPipeline;
     private final String key;
     //pub/sub的通道
     private final String pubsubChannel;
@@ -91,8 +90,6 @@ public class TairSemaphore extends AbstractLifeCycle {
                          String key, int permits, long timeOut, boolean tsCalculate) {
         this.selector = selector;
         this.jedisPool = jedisPool;
-        this.tairStringPipeline = new TairStringPipeline();
-        this.tairStringPipeline.setClient(jedisPool.getResource().getClient());
         this.key = KEY_PREFIX + key;
         this.pubsubChannel = PUBSUB_PREFIX + key;
         this.maxPermits = permits;
@@ -131,7 +128,7 @@ public class TairSemaphore extends AbstractLifeCycle {
             @Override
             public void onBecomeLeader() {
                 //这里变为Leader
-                Long ttl = jedisPool.getResource().ttl(BLOCK_KEY_PREFIX);
+                Long ttl = TairUtil.poolExecute(jedisPool, jedis -> jedis.ttl(BLOCK_KEY_PREFIX));
                 if (null == ttl || ttl == -1) {
                     markRebuild(rebuildTimeout);
                     startRebuild();
@@ -147,7 +144,10 @@ public class TairSemaphore extends AbstractLifeCycle {
     @Override
     protected void doStart() {
         new Thread(() -> {
-            jedisPool.getResource().subscribe(pubSub, pubsubChannel);
+            TairUtil.poolExecute(jedisPool, jedis -> {
+                jedis.subscribe(pubSub, pubsubChannel);
+                return null;
+            });
         }).start();
         selector.registerListener(listener);
     }
@@ -180,7 +180,7 @@ public class TairSemaphore extends AbstractLifeCycle {
         paramsAgg.aggSum(3000); //每3秒
 
         List<ExtsSkeyResult> extsmrange = TairUtil.poolExecute(jedisPool, jedis -> {
-            TairTs tairTs = new TairTs(jedisPool.getResource());
+            TairTs tairTs = new TairTs(jedis);
             return tairTs.extsmrange(TS_PKEY, new ArrayList<String>() {{
                 add(tsTimeKey);
                 add(tsCountKey);
@@ -217,7 +217,7 @@ public class TairSemaphore extends AbstractLifeCycle {
         params.nx().px(timeout + TimeUnit.SECONDS.toMillis(3));
 
         TairUtil.poolExecute(jedisPool, jedis -> {
-            TairString tairString = new TairString(jedisPool.getResource());
+            TairString tairString = new TairString(jedis);
             return tairString.exset(BLOCK_KEY_PREFIX, "1", params);
         });
     }
@@ -225,8 +225,13 @@ public class TairSemaphore extends AbstractLifeCycle {
     private void startRebuild() {
         ExsetParams params = new ExsetParams();
         params.xx();
-        tairStringPipeline.exset(key, String.valueOf(2 * maxPermits + 1), params);
-        tairStringPipeline.sync();
+        TairUtil.poolExecute(jedisPool, jedis -> {
+            TairStringPipeline tairStringPipeline = new TairStringPipeline();
+            tairStringPipeline.setClient(jedis.getClient());
+            tairStringPipeline.exset(key, String.valueOf(2 * maxPermits + 1), params);
+            tairStringPipeline.sync();
+            return null;
+        });
     }
 
     /**
@@ -237,7 +242,7 @@ public class TairSemaphore extends AbstractLifeCycle {
     private void clearRebuild(long timeout) {
         GlobalExecutor.schedule().schedule(() -> {
             ExgetResult<String> exget = TairUtil.poolExecute(jedisPool, jedis -> {
-                TairString tairString = new TairString(jedisPool.getResource());
+                TairString tairString = new TairString(jedis);
                 return tairString.exget(key);
             });
             if (exget == null || Integer.parseInt(exget.getValue()) > maxPermits) {
@@ -246,9 +251,14 @@ public class TairSemaphore extends AbstractLifeCycle {
             }
             ExsetParams params = new ExsetParams();
             params.xx();
-            tairStringPipeline.exset(key, "0", params);
-            tairStringPipeline.del(BLOCK_KEY_PREFIX);
-            tairStringPipeline.sync();
+            TairUtil.poolExecute(jedisPool, jedis -> {
+                TairStringPipeline tairStringPipeline = new TairStringPipeline();
+                tairStringPipeline.setClient(jedis.getClient());
+                tairStringPipeline.exset(key, "0", params);
+                tairStringPipeline.del(BLOCK_KEY_PREFIX);
+                tairStringPipeline.sync();
+                return null;
+            });
         }, timeout, TimeUnit.MILLISECONDS);
     }
 
@@ -288,6 +298,9 @@ public class TairSemaphore extends AbstractLifeCycle {
                         LockSupport.park();
                     } else {
                         waitQueue.poll();
+                        if (tsCalculate) {
+                            BEGIN_TIME_LOCAL.set(System.currentTimeMillis());
+                        }
                         return;
                     }
                 } else {
@@ -302,7 +315,7 @@ public class TairSemaphore extends AbstractLifeCycle {
     }
 
     //todo 添加超时的检测的任务
-    public boolean tayAcquire(int permits, long timeout, TimeUnit unit) {
+    public boolean tryAcquire(int permits, long timeout, TimeUnit unit) {
         long nanosTimeout = unit.toNanos(timeout);
         long deadline = System.nanoTime() + nanosTimeout;
         while (!isStart()) {
@@ -322,23 +335,22 @@ public class TairSemaphore extends AbstractLifeCycle {
 
     public void release(int permits) {
         if (tryRelease(permits)) {
-            jedisPool.getResource().publish(pubsubChannel, "1");
+            TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "1"));
             //记录到TairTs中, 用于计算处理的真实耗时
             if (tsCalculate) {
                 long current = System.currentTimeMillis();
                 long duration = current - BEGIN_TIME_LOCAL.get();
                 ExtsAttributesParams params = new ExtsAttributesParams();
                 //统计近30秒内的数据信息
-                params.dataEt(tsDateEt);
-                params.chunkSize(chunkSize);
+                params.dataEt(tsDateEt).uncompressed().chunkSize(chunkSize);
                 current = current - (current % tsInterval);
                 ArrayList<ExtsDataPoint<String>> skeys = new ArrayList<>();
                 skeys.add(new ExtsDataPoint<>(tsTimeKey, String.valueOf(current), duration));
                 skeys.add(new ExtsDataPoint<>(tsCountKey, String.valueOf(current), 1));
 
                 TairUtil.poolExecute(jedisPool, jedis -> {
-                    TairTs tairTs = new TairTs(jedisPool.getResource());
-                    return tairTs.extsmincr(TS_PKEY, skeys, params);
+                    TairTs tairTs = new TairTs(jedis);
+                    return tairTs.extsmrawincr(TS_PKEY, skeys, params);
                 });
             }
         }
@@ -349,7 +361,7 @@ public class TairSemaphore extends AbstractLifeCycle {
             ExincrbyParams params = new ExincrbyParams();
             params.max(maxPermits);
             TairUtil.poolExecute(jedisPool, jedis -> {
-                TairString tairString = new TairString(jedisPool.getResource());
+                TairString tairString = new TairString(jedis);
                 return tairString.exincrBy(key, permits, params);
             });
             return true;
@@ -366,7 +378,7 @@ public class TairSemaphore extends AbstractLifeCycle {
             ExincrbyParams params = new ExincrbyParams();
             params.min(0);
             TairUtil.poolExecute(jedisPool, jedis -> {
-                TairString tairString = new TairString(jedisPool.getResource());
+                TairString tairString = new TairString(jedis);
                 return tairString.exincrBy(key, -permits, params);
             });
             return true;

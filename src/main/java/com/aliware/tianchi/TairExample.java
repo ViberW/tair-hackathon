@@ -1,5 +1,6 @@
 package com.aliware.tianchi;
 
+import com.aliware.tianchi.common.GlobalExecutor;
 import com.aliware.tianchi.leader.LeaderSelector;
 import com.aliware.tianchi.semaphore.TairSemaphore;
 import redis.clients.jedis.Jedis;
@@ -9,6 +10,7 @@ import redis.clients.jedis.JedisPoolConfig;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * @author Viber
@@ -31,12 +33,15 @@ public class TairExample {
     static long endTime;
 
     private static void testTairSemaphore(JedisPool jedisPool) {
+        GlobalExecutor.schedule().scheduleWithFixedDelay(() -> {
+            System.out.println("==================" + atomic.get());
+        }, 500, 500, TimeUnit.MILLISECONDS);
         System.out.println("准备启动测试...");
         LeaderSelector selector = new LeaderSelector(jedisPool, "default");
         selector.start();
-        endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(60);//执行60秒
+        endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
 
-        int serverCount = 1;
+        int serverCount = 5;
         CountDownLatch countDownLatch = new CountDownLatch(serverCount);
         System.out.println("启动各个服务...");
         for (int i = 0; i < serverCount; i++) {
@@ -47,20 +52,23 @@ public class TairExample {
                 countDownLatch.countDown();
             }).start();
         }
-        System.out.println("所有服务测试完成...");
         try {
             countDownLatch.await();
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
+        System.out.println("所有服务测试完成...");
         selector.stop();
+        GlobalExecutor.instance().stop();
     }
+
+    static AtomicInteger atomic = new AtomicInteger(0);
 
     //模拟服务器
     private static void simulateServer(LeaderSelector selector, JedisPool jedisPool, int serverId) {
         System.out.println(serverId + "服务构建semaphore...");
         TairSemaphore tairSemaphore = new TairSemaphore(selector, jedisPool,
-                "test", 100, TimeUnit.SECONDS.toMillis(5), true);
+                "test", 5, TimeUnit.SECONDS.toMillis(5), true);
         tairSemaphore.start();
         //模拟多线程
         int threadCount = 3;
@@ -69,27 +77,31 @@ public class TairExample {
             int threadId = i;
             new Thread(() -> {
                 //执行处理
+                int count = 0;
                 while (System.currentTimeMillis() < endTime
                         || (ThreadLocalRandom.current().nextInt(5) == 0)) {
                     tairSemaphore.acquire();
                     try {
-                        System.out.println("serverId: " + serverId + ", threadId: " + threadId);
+                        atomic.incrementAndGet();
+                        System.out.println("serverId: " + serverId + ", threadId: " + threadId + ", count: " + count++);
                         Thread.sleep(2000 + ThreadLocalRandom.current().nextInt(1000));
                     } catch (InterruptedException e) {
                         e.printStackTrace();
                     } finally {
+                        atomic.decrementAndGet();
                         tairSemaphore.release();
                     }
                 }
+                System.out.println("serverId: " + serverId + ", threadId: " + threadId + "===========");
                 countDownLatch.countDown();
             }).start();
         }
-        System.out.println(serverId + "服务测试完成...");
         try {
             countDownLatch.await();
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
+        System.out.println(serverId + "服务测试完成...");
         tairSemaphore.stop();
     }
 }
