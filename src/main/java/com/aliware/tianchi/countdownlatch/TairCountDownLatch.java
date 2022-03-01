@@ -103,6 +103,7 @@ public class TairCountDownLatch {
             } else if (nanosTimeout > 1000L) {//spinForTimeoutThreshold
                 LockSupport.park(nanosTimeout);
             }
+            //todo 添加到队列中去
         }
         return true;
     }

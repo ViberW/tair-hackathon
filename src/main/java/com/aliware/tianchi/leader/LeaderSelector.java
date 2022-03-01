@@ -3,13 +3,12 @@ package com.aliware.tianchi.leader;
 import com.aliware.tianchi.common.AbstractLifeCycle;
 import com.aliware.tianchi.common.Constants;
 import com.aliware.tianchi.common.GlobalExecutor;
+import com.aliware.tianchi.common.TairUtil;
 import com.aliyun.tair.ModuleCommand;
 import com.aliyun.tair.tairhash.TairHash;
+import com.aliyun.tair.tairhash.params.ExhgetwithverResult;
 import com.aliyun.tair.tairhash.params.ExhsetParams;
-import redis.clients.jedis.BuilderFactory;
-import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisPubSub;
-import redis.clients.jedis.Protocol;
+import redis.clients.jedis.*;
 import redis.clients.jedis.util.SafeEncoder;
 
 import java.util.List;
@@ -29,8 +28,7 @@ public class LeaderSelector extends AbstractLifeCycle {
     private static final String KEY_PREFIX = "_hackathon:leader:";
     private static final String PUBSUB_PREFIX = "_pubsub:leader:";
     //通知每个节点 尝试去争抢
-    private final Jedis jedis;
-    private final TairHash tairHash;
+    private final JedisPool jedisPool;
     private JedisPubSub pubSub;
     private final String key;
     //pub/sub的通道
@@ -48,9 +46,8 @@ public class LeaderSelector extends AbstractLifeCycle {
     //随便些的监听
     private List<LeaderListener> listeners = new CopyOnWriteArrayList<>();
 
-    public LeaderSelector(Jedis jedis, String name) {
-        this.jedis = jedis;
-        this.tairHash = new TairHash(jedis);
+    public LeaderSelector(JedisPool jedisPool, String name) {
+        this.jedisPool = jedisPool;
         this.key = KEY_PREFIX + name;
         this.pubsubChannel = PUBSUB_PREFIX + name;
     }
@@ -81,7 +78,14 @@ public class LeaderSelector extends AbstractLifeCycle {
                 }
             }
         };
-        jedis.subscribe(pubSub, pubsubChannel);
+        new Thread(() -> {
+            Jedis resource = jedisPool.getResource();
+            try {
+                resource.subscribe(pubSub, pubsubChannel);
+            } finally {
+                resource.close();
+            }
+        }).start();
         //注册节点的信息
         registerNode();
         //这里一开始判断是否有主节点在, 并尝试注册主节点
@@ -90,7 +94,12 @@ public class LeaderSelector extends AbstractLifeCycle {
 
     @Override
     protected void doStop() {
-        jedis.publish(pubsubChannel, nodeId + "@" + "REMOVE");
+        Jedis jedis = jedisPool.getResource();
+        try {
+            jedis.publish(pubsubChannel, nodeId + "@" + "REMOVE");
+        } finally {
+            jedis.close();
+        }
         pubSub.unsubscribe(pubsubChannel);
     }
 
@@ -100,23 +109,43 @@ public class LeaderSelector extends AbstractLifeCycle {
     private void registerLeader() {
         GlobalExecutor.schedule().scheduleWithFixedDelay(() -> {
             if (isStart()) {
-                if (master) {
-                    tairHash.exhexpire(key, Constants.NODE_LEADER, sessionTimeout);
-                } else {
-                    String exhget = tairHash.exhget(key, Constants.NODE_LEADER);
-                    if (null == exhget) {
-                        //注册master
+                if (!master) {
+                    ExhgetwithverResult<String> exhgetwithver = TairUtil.poolExecute(jedisPool, jedis -> {
+                        TairHash tairHash = new TairHash(jedisPool.getResource());
+                        return tairHash.exhgetwithver(key, Constants.NODE_LEADER);
+                    });
+                    if (null == exhgetwithver) {
                         ExhsetParams params = new ExhsetParams();
-                        params.ex(sessionTimeout);
-                        params.nx();
-                        Long exhset = tairHash.exhset(key, Constants.NODE_LEADER,
-                                String.valueOf(nodeId), params);
+                        params.nx().ex(sessionTimeout);
+
+                        Long exhset = TairUtil.poolExecute(jedisPool, jedis -> {
+                            TairHash tairHash = new TairHash(jedisPool.getResource());
+                            return tairHash.exhset(key, Constants.NODE_LEADER, String.valueOf(nodeId), params);
+                        });
                         if (null != exhset && exhset == 1) {
                             master = true;
                             for (LeaderListener listener : listeners) {
-                                GlobalExecutor.singleExecutor().execute(() -> {
-                                    listener.onBecomeLeader();
-                                });
+                                GlobalExecutor.singleExecutor().execute(listener::onBecomeLeader);
+                            }
+                        }
+                    } else {
+                        //校验节点是否存在
+                        Boolean hexists = TairUtil.poolExecute(jedisPool, jedis -> {
+                            TairHash tairHash = new TairHash(jedisPool.getResource());
+                            return tairHash.exhexists(key, exhgetwithver.getValue());
+                        });
+                        if (null == hexists || !hexists) {
+                            ExhsetParams params = new ExhsetParams();
+                            params.xx().ex(sessionTimeout).ver(exhgetwithver.getVer());//尝试版本的更新
+
+
+                            Long exhset = TairUtil.poolExecute(jedisPool, jedis -> {
+                                TairHash tairHash = new TairHash(jedisPool.getResource());
+                                return tairHash.exhset(key, Constants.NODE_LEADER,
+                                        String.valueOf(nodeId), params);
+                            });
+                            if (null != exhset && exhset == 1) {
+                                master = true;
                             }
                         }
                     }
@@ -144,13 +173,23 @@ public class LeaderSelector extends AbstractLifeCycle {
             String field = String.valueOf(newNodeId);
             ExhsetParams params = new ExhsetParams();
             params.nx().ex(sessionTimeout);
-            Long exhset = tairHash.exhset(key, field,
-                    String.valueOf(System.currentTimeMillis()), params);
+
+
+            Long exhset = TairUtil.poolExecute(jedisPool, jedis -> {
+                TairHash tairHash = new TairHash(jedisPool.getResource());
+                return tairHash.exhset(key, field,
+                        String.valueOf(System.currentTimeMillis()), params);
+            });
             if (null != exhset && exhset >= 0) {
                 ticketKeepalive();
                 nodeId = newNodeId;
                 nodeVersion = 1L;
-                jedis.publish(pubsubChannel, nodeId + "@" + "ADD");
+                Jedis jedis = jedisPool.getResource();
+                try {
+                    jedis.publish(pubsubChannel, nodeId + "@" + "ADD");
+                } finally {
+                    jedis.close();
+                }
                 break;
             }
         } while (true);
@@ -189,11 +228,16 @@ public class LeaderSelector extends AbstractLifeCycle {
     @SuppressWarnings("all")
     private Boolean exhexpire(String key, String field, int seconds, long version) {
         try {
-            Object obj = jedis.sendCommand(ModuleCommand.EXHEXPIRE,
-                    new byte[][]{SafeEncoder.encode(key), SafeEncoder.encode(field),
-                            Protocol.toByteArray(seconds), SafeEncoder.encode("ver"),
-                            SafeEncoder.encode(String.valueOf(version))});
-            return BuilderFactory.BOOLEAN.build(obj);
+            Jedis jedis = jedisPool.getResource();
+            try {
+                Object obj = jedis.sendCommand(ModuleCommand.EXHEXPIRE,
+                        new byte[][]{SafeEncoder.encode(key), SafeEncoder.encode(field),
+                                Protocol.toByteArray(seconds), SafeEncoder.encode("ver"),
+                                SafeEncoder.encode(String.valueOf(version))});
+                return BuilderFactory.BOOLEAN.build(obj);
+            } finally {
+                jedis.close();
+            }
         } catch (Exception e) {
             if (e.getMessage().contains("version")) {
                 return false;
