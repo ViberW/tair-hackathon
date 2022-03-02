@@ -1,5 +1,6 @@
 package com.aliware.tianchi.semaphore;
 
+import com.aliware.tianchi.TairExample;
 import com.aliware.tianchi.common.AbstractLifeCycle;
 import com.aliware.tianchi.common.CommonUtil;
 import com.aliware.tianchi.common.GlobalExecutor;
@@ -17,7 +18,6 @@ import com.aliyun.tair.tairts.params.ExtsAttributesParams;
 import com.aliyun.tair.tairts.params.ExtsDataPoint;
 import com.aliyun.tair.tairts.results.ExtsDataPointResult;
 import com.aliyun.tair.tairts.results.ExtsSkeyResult;
-import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPubSub;
 
@@ -143,12 +143,18 @@ public class TairSemaphore extends AbstractLifeCycle {
 
     @Override
     protected void doStart() {
-        new Thread(() -> {
+        new Thread(Thread.currentThread().getThreadGroup(), () -> {
             TairUtil.poolExecute(jedisPool, jedis -> {
                 jedis.subscribe(pubSub, pubsubChannel);
                 return null;
             });
-        }).start();
+        }, "semaphore_subscribe", 0).start();
+        while (!pubSub.isSubscribed()) {
+            try {
+                Thread.sleep(0);
+            } catch (InterruptedException e) {
+            }
+        }
         selector.registerListener(listener);
     }
 
@@ -265,16 +271,17 @@ public class TairSemaphore extends AbstractLifeCycle {
     private void notifyNode() {
         WaitNode node;
         while ((node = waitQueue.peek()) != null) {
-            Thread th = node.thread;
-            if (th.isInterrupted()) {
-                continue;
-            }
             if (node.release.get()) {
                 return;
             }
+            //这里是不是需要等待呢?
             if (node.release.compareAndSet(false, true)) {
                 //防止并发情况下, 直接将当前给释放掉了
-                LockSupport.unpark(th);
+                LockSupport.unpark(node.thread);
+                if (node.thread.isInterrupted()) {
+                    continue;
+                }
+                return;
             }
         }
     }
@@ -290,22 +297,20 @@ public class TairSemaphore extends AbstractLifeCycle {
 
     public void acquire(int permits) {
         if (!tryAcquire(permits)) {
-            waitQueue.offer(new WaitNode(Thread.currentThread()));
+            WaitNode waitNode = new WaitNode(Thread.currentThread());
+            waitQueue.offer(waitNode);
             for (; ; ) {
                 WaitNode head = waitQueue.peek();
-                if (head != null && head.thread == Thread.currentThread()) {
-                    if (!tryAcquire(permits)) {
-                        LockSupport.park();
-                    } else {
-                        waitQueue.poll();
-                        if (tsCalculate) {
-                            BEGIN_TIME_LOCAL.set(System.currentTimeMillis());
-                        }
-                        return;
+                if (head.thread == Thread.currentThread()
+                        && tryAcquire(permits)) {
+                    waitQueue.poll();
+                    if (tsCalculate) {
+                        BEGIN_TIME_LOCAL.set(System.currentTimeMillis());
                     }
-                } else {
-                    LockSupport.park();
+                    return;
                 }
+                waitNode.release.set(false);
+                LockSupport.park();
             }
         }
         //记录当前的执行耗时
@@ -384,14 +389,14 @@ public class TairSemaphore extends AbstractLifeCycle {
             return true;
         } catch (Exception e) {
             if (e.getMessage().contains("increment or decrement would overflow")) {
-                return true; //这里认为是true吧
+                return false;
             }
             throw e;
         }
     }
 
     static class WaitNode {
-        private Thread thread;
+        private volatile Thread thread;
         private AtomicBoolean release = new AtomicBoolean(false);
 
         public WaitNode(Thread thread) {

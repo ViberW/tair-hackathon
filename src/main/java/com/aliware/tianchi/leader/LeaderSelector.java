@@ -41,9 +41,7 @@ public class LeaderSelector extends AbstractLifeCycle {
     private int ticketTimeout = 5;
 
     private Integer nodeId;
-    private Long nodeVersion = 1L;
     private volatile boolean master = false;
-    private ConcurrentHashMap<Integer, Boolean> map = new ConcurrentHashMap<>();
     //随便些的监听
     private List<LeaderListener> listeners = new CopyOnWriteArrayList<>();
 
@@ -63,14 +61,12 @@ public class LeaderSelector extends AbstractLifeCycle {
                 String[] split = message.split("@");
                 Integer msgNodeId = Integer.valueOf(split[0]);
                 if ("REMOVE".equals(split[0])) {
-                    map.remove(msgNodeId);
                     for (LeaderListener listener : listeners) {
                         GlobalExecutor.singleExecutor().execute(() -> {
                             listener.onRemoveNode(master);
                         });
                     }
                 } else {
-                    map.put(msgNodeId, Boolean.TRUE);
                     for (LeaderListener listener : listeners) {
                         GlobalExecutor.singleExecutor().execute(() -> {
                             listener.onAddNode(master);
@@ -79,19 +75,18 @@ public class LeaderSelector extends AbstractLifeCycle {
                 }
             }
         };
-        new Thread(() -> {
+        new Thread(Thread.currentThread().getThreadGroup(), () -> {
             TairUtil.poolExecute(jedisPool, jedis -> {
                 jedis.subscribe(pubSub, pubsubChannel);
                 return null;
             });
-        }).start();
-        //初始化map列表
-        Set<String> keys = TairUtil.poolExecute(jedisPool, jedis -> {
-            TairHash tairHash = new TairHash(jedis);
-            return tairHash.exhkeys(key);
-        });
-        //初始化节点列表
-        keys.forEach(s -> map.put(Integer.valueOf(s), Boolean.TRUE));
+        }, "leader_subscribe", 0).start();
+        while (!pubSub.isSubscribed()) {
+            try {
+                Thread.sleep(0);
+            } catch (InterruptedException e) {
+            }
+        }
         //注册节点的信息
         registerNode();
         //这里一开始判断是否有主节点在, 并尝试注册主节点
@@ -110,7 +105,11 @@ public class LeaderSelector extends AbstractLifeCycle {
     private void registerLeader() {
         GlobalExecutor.schedule().schedule(() -> {
             if (isStart()) {
-                startRegisterLeader();
+                try {
+                    startRegisterLeader();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
                 registerLeader();
             }
         }, ticketTimeout, TimeUnit.SECONDS);
@@ -138,7 +137,10 @@ public class LeaderSelector extends AbstractLifeCycle {
                 }
             } else {
                 if (exhgetwithver.getValue().equals(String.valueOf(nodeId))) {
-                    Boolean exhexpire = exhexpire(key, Constants.NODE_LEADER, sessionTimeout, nodeVersion);
+                    Boolean exhexpire = TairUtil.poolExecute(jedisPool, jedis -> {
+                        TairHash tairHash = new TairHash(jedisPool.getResource());
+                        return tairHash.exhexpire(key, String.valueOf(nodeId), sessionTimeout);
+                    });
                     if (Boolean.TRUE.equals(exhexpire)) {
                         master = true;
                         return;
@@ -152,11 +154,16 @@ public class LeaderSelector extends AbstractLifeCycle {
                 if (null == hexists || !hexists) {
                     ExhsetParams params = new ExhsetParams();
                     params.xx().ex(sessionTimeout).ver(exhgetwithver.getVer());//尝试版本的更新
-                    Long exhset = TairUtil.poolExecute(jedisPool, jedis -> {
-                        TairHash tairHash = new TairHash(jedis);
-                        return tairHash.exhset(key, Constants.NODE_LEADER,
-                                String.valueOf(nodeId), params);
-                    });
+                    Long exhset = null;
+                    try {
+                        exhset = TairUtil.poolExecute(jedisPool, jedis -> {
+                            TairHash tairHash = new TairHash(jedis);
+                            return tairHash.exhset(key, Constants.NODE_LEADER,
+                                    String.valueOf(nodeId), params);
+                        });
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
                     if (null != exhset && exhset == 1) {
                         master = true;
                     }
@@ -176,17 +183,8 @@ public class LeaderSelector extends AbstractLifeCycle {
      */
     private void registerNode() {
         int newNodeId = null == nodeId ? ThreadLocalRandom.current().nextInt(1024) : nodeId;
-        int oldId = newNodeId;
         do {
-            while (map.containsKey(newNodeId)) {
-                newNodeId++;
-                if (newNodeId >= 1024) {
-                    newNodeId = 0;
-                }
-                if (oldId == newNodeId) {
-                    throw new IllegalStateException("节点过多");
-                }
-            }
+            newNodeId++;
             String field = String.valueOf(newNodeId);
             ExhsetParams params = new ExhsetParams();
             params.nx().ex(sessionTimeout);
@@ -197,7 +195,7 @@ public class LeaderSelector extends AbstractLifeCycle {
                         String.valueOf(System.currentTimeMillis()), params);
             });
             if (null != exhset && exhset >= 0) {
-                nodeVersion = 1L;
+                System.out.println("success register node:" + newNodeId);
                 nodeId = newNodeId;
                 ticketKeepalive();
                 TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, nodeId + "@" + "ADD"));
@@ -212,53 +210,13 @@ public class LeaderSelector extends AbstractLifeCycle {
     private void ticketKeepalive() {
         GlobalExecutor.schedule().schedule(() -> {
             if (isStart()) {
-                startTicketKeepalive();
+                TairUtil.poolExecute(jedisPool, jedis -> {
+                    TairHash tairHash = new TairHash(jedisPool.getResource());
+                    return tairHash.exhexpire(key, String.valueOf(nodeId), sessionTimeout);
+                });
                 ticketKeepalive();
             }
         }, ticketTimeout, TimeUnit.SECONDS);
-    }
-
-    private void startTicketKeepalive() {
-//                tairHash.exhexpire(key, String.valueOf(nodeId), sessionTimeout);
-        Boolean exhexpire = exhexpire(key, String.valueOf(nodeId), sessionTimeout, nodeVersion);
-        if (Boolean.TRUE.equals(exhexpire)) {
-            //更新当前节点的版本号
-            nodeVersion++;
-        } else {
-            System.out.println("startTicketKeepalive catch version change: " + nodeVersion + " with node:" + nodeId);
-            //说明维持注册的信息发生了变化,可能因为应用处理慢或GC问题等
-            master = false;
-            registerNode();
-        }
-    }
-
-
-    /**
-     * 由于version的参数并未在1.9.0版本开放, 所以只能手动添加version的设置了
-     *
-     * @param key     hashkey
-     * @param field   hashfield
-     * @param seconds ttl时间
-     * @param version 当前的版本
-     * @return
-     */
-    @SuppressWarnings("all")
-    private Boolean exhexpire(String key, String field, int seconds, long version) {
-        try {
-            return TairUtil.poolExecute(jedisPool, jedis -> {
-                Object obj = jedis.sendCommand(ModuleCommand.EXHEXPIRE,
-                        new byte[][]{SafeEncoder.encode(key), SafeEncoder.encode(field),
-                                Protocol.toByteArray(seconds), SafeEncoder.encode("ver"),
-                                SafeEncoder.encode(String.valueOf(version))});
-                return BuilderFactory.BOOLEAN.build(obj);
-            });
-        } catch (Exception e) {
-            e.printStackTrace();
-            if (e.getMessage().contains("version")) {
-                return false;
-            }
-            throw new IllegalStateException("redis state failure", e);
-        }
     }
 
     /**
