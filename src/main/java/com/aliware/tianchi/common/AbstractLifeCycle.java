@@ -1,5 +1,7 @@
 package com.aliware.tianchi.common;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 /**
  * @author Viber
  * @version 1.0
@@ -7,12 +9,13 @@ package com.aliware.tianchi.common;
  * @since 2022/2/23 9:50
  */
 public abstract class AbstractLifeCycle implements LifeCycle {
-    private volatile boolean start = false;
+    private AtomicBoolean state = new AtomicBoolean(false);
 
     @Override
     public void start() {
-        this.start = true;
-        doStart();
+        if (this.state.compareAndSet(false, true)) {
+            doStart();
+        }
     }
 
     protected void doStart() {
@@ -20,8 +23,9 @@ public abstract class AbstractLifeCycle implements LifeCycle {
 
     @Override
     public void stop() {
-        this.start = false;
-        doStop();
+        if (this.state.compareAndSet(true, false)) {
+            doStop();
+        }
     }
 
     protected void doStop() {
@@ -29,12 +33,7 @@ public abstract class AbstractLifeCycle implements LifeCycle {
 
     @Override
     public boolean isStart() {
-        return this.start;
+        return this.state.get();
     }
 
-    protected void checkState() {
-        if (!isStart()) {
-            throw new IllegalStateException(this.getClass().getSimpleName() + " is stopped");
-        }
-    }
 }

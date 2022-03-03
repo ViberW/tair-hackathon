@@ -25,27 +25,25 @@ public class TairExample {
 
 
     public static void main(String[] args) throws Exception {
-        testTairSemaphore();
+        testTairSemaphore(5, 3);
     }
-
 
     static long endTime;
 
-    private static void testTairSemaphore() {
+    private static void testTairSemaphore(int serverCount, int pieceThreadCount) {
         GlobalExecutor.schedule().scheduleWithFixedDelay(() -> {
             System.out.println("当前的信号量=====" + atomic.get());
         }, 500, 500, TimeUnit.MILLISECONDS);
         System.out.println("准备启动测试...");
         endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
 
-        int serverCount = 5;
         CountDownLatch countDownLatch = new CountDownLatch(serverCount);
         System.out.println("启动各个服务...");
         for (int i = 0; i < serverCount; i++) {
             //模拟多个服务器
             int serverId = i;
             factory.newThread(() -> {
-                simulateServer(serverId);
+                simulateServer(serverId, pieceThreadCount);
                 countDownLatch.countDown();
             }).start();
         }
@@ -62,7 +60,7 @@ public class TairExample {
     static NamedThreadFactory factory = new NamedThreadFactory("test_");
 
     //模拟服务器
-    private static void simulateServer(int serverId) {
+    private static void simulateServer(int serverId, int threadCount) {
         JedisPoolConfig jedisPoolConfig = new JedisPoolConfig();
         jedisPoolConfig.setMaxTotal(20);
         JedisPool jedisPool = new JedisPool(jedisPoolConfig, HOST, PORT, 60 * 1000, PWD);
@@ -74,7 +72,6 @@ public class TairExample {
                 "test", 5, TimeUnit.SECONDS.toMillis(5), false);
         tairSemaphore.start();
         //模拟多线程
-        int threadCount = 3;
         CountDownLatch countDownLatch = new CountDownLatch(threadCount);
         long randomTime = endTime + ThreadLocalRandom.current().nextInt(3) * TimeUnit.SECONDS.toMillis(5);
         System.out.println(serverId + "服务构建==开始任务处理..............");

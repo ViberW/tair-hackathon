@@ -11,12 +11,12 @@ public interface LeaderListener {
     /**
      * master在检测节点移除时
      */
-    void onRemoveNode(boolean leader);
+    void onRemoveNode();
 
     /**
      * master在检测节点添加时
      */
-    void onAddNode(boolean leader);
+    void onAddNode();
 
     /**
      * node变为master时

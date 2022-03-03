@@ -2,15 +2,11 @@ package com.aliware.tianchi.semaphore;
 
 import com.aliware.tianchi.common.AbstractLifeCycle;
 import com.aliware.tianchi.common.CommonUtil;
-import com.aliware.tianchi.common.GlobalExecutor;
+import com.aliware.tianchi.common.ConstTimeRecord;
 import com.aliware.tianchi.common.TairUtil;
-import com.aliware.tianchi.leader.LeaderListener;
 import com.aliware.tianchi.leader.LeaderSelector;
 import com.aliyun.tair.tairstring.TairString;
-import com.aliyun.tair.tairstring.TairStringPipeline;
 import com.aliyun.tair.tairstring.params.ExincrbyParams;
-import com.aliyun.tair.tairstring.params.ExsetParams;
-import com.aliyun.tair.tairstring.results.ExgetResult;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPubSub;
 
@@ -30,12 +26,7 @@ import java.util.concurrent.locks.LockSupport;
 public class TairSemaphore extends AbstractLifeCycle {
 
     private static final String KEY_PREFIX = "_hackathon:semaphore:";
-    private static final String BLOCK_KEY_PREFIX = "_hackathon:_block:semaphore:";
     private static final String PUBSUB_PREFIX = "_pubsub:semaphore:";
-
-    private static final String TS_PKEY = "_ts:semaphore:pkey";
-    private static final String TS_S_TIME_KEY_PREFIX = "s_time:";
-    private static final String TS_S_COUNT_KEY_PREFIX = "s_count:";
 
     //通知每个节点 尝试去争抢
     private final JedisPool jedisPool;
@@ -53,11 +44,6 @@ public class TairSemaphore extends AbstractLifeCycle {
     private SemaphoreNodeListener listener;
 
     private LeaderSelector selector;
-
-    /**
-     * 重新构建的超时时间
-     */
-    private volatile long rebuildTimeout;
 
     /**
      * ts时间计算相关的
@@ -92,10 +78,8 @@ public class TairSemaphore extends AbstractLifeCycle {
         this.key = KEY_PREFIX + key;
         this.pubsubChannel = PUBSUB_PREFIX + key;
         this.maxPermits = permits;
-        this.rebuildTimeout = timeOut;
-        this.tsCalculate = tsCalculate;
-        if (tsCalculate) {
-            tairTsRecord = new TairTsRecord(jedisPool, key);
+        if (this.tsCalculate = tsCalculate) {
+            tairTsRecord = new TairTsRecord(jedisPool, key, timeOut);
         }
         //监听pub/sub消息, 获取到消息则将头部的消息取出,并进行处理, 变更状态有变化, 通过cas进行变更通知, 唤醒第一个线程
         this.pubSub = new JedisPubSub() {
@@ -104,11 +88,15 @@ public class TairSemaphore extends AbstractLifeCycle {
                 notifyNode();
             }
         };
-        this.listener = new SemaphoreNodeListener(jedisPool, this, key, tsCalculate);
+        this.listener = new SemaphoreNodeListener(jedisPool, this, selector,
+                tsCalculate ? tairTsRecord : new ConstTimeRecord(timeOut), key);
     }
 
     @Override
     protected void doStart() {
+        if (this.tsCalculate) {
+            tairTsRecord.start();
+        }
         CommonUtil.pubsubThread(() -> {
             TairUtil.poolExecute(jedisPool, jedis -> {
                 jedis.subscribe(pubSub, pubsubChannel);
@@ -118,14 +106,15 @@ public class TairSemaphore extends AbstractLifeCycle {
         while (!pubSub.isSubscribed()) {
             CommonUtil.sleep(0);
         }
-        listener.start();
         selector.registerListener(listener);
     }
 
     @Override
     protected void doStop() {
+        if (this.tsCalculate) {
+            tairTsRecord.stop();
+        }
         pubSub.unsubscribe(pubsubChannel);
-        listener.stop();
         selector.unRegisterListener(listener);
     }
 

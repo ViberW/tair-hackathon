@@ -1,7 +1,6 @@
 package com.aliware.tianchi.semaphore;
 
-import com.aliware.tianchi.common.CommonUtil;
-import com.aliware.tianchi.common.TairUtil;
+import com.aliware.tianchi.common.*;
 import com.aliyun.tair.tairts.TairTs;
 import com.aliyun.tair.tairts.params.ExtsAggregationParams;
 import com.aliyun.tair.tairts.params.ExtsAttributesParams;
@@ -20,7 +19,7 @@ import java.util.concurrent.TimeUnit;
  * @apiNote
  * @since 2022/3/3 13:36
  */
-public class TairTsRecord {
+public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
 
     private static final String TS_PKEY = "_ts:ts:pkey";
     private static final String TS_S_TIME_KEY_PREFIX = "s_time:";
@@ -38,13 +37,42 @@ public class TairTsRecord {
     private long tsDateEt = TimeUnit.SECONDS.toMillis(30);
     //记录的存储间隔
     private long tsInterval = 200;
+    /**
+     * 重新构建的超时时间
+     */
+    private volatile long stopTimeout;
 
 
-    public TairTsRecord(JedisPool jedisPool, String key) {
+    public TairTsRecord(JedisPool jedisPool, String key, long stopTimeout) {
         this.jedisPool = jedisPool;
         tsTimeKey = TS_S_TIME_KEY_PREFIX + key;
         tsCountKey = TS_S_COUNT_KEY_PREFIX + key;
         chunkSize = CommonUtil.calculateChunkSize(tsDateEt, tsInterval);
+        this.stopTimeout = stopTimeout;
+    }
+
+    @Override
+    public long getTime() {
+        return stopTimeout;
+    }
+
+    @Override
+    protected void doStart() {
+        startTsCalculate();
+    }
+
+    private void startTsCalculate() {
+        GlobalExecutor.schedule().schedule(() -> {
+            if (isStart()) {
+                //就简单计算了,  其实可以根据多个点的斜率变化, 判断处理时长的变化趋势, 从而选择增大或减少停顿的合适时间
+                long l = this.tsCalculate();
+                if (l > 0) {
+                    this.stopTimeout = (stopTimeout + l) / 2 + 500;//追加500ms
+                }
+                System.out.println("current_calculate_time: " + stopTimeout);
+                startTsCalculate();
+            }
+        }, 10, TimeUnit.SECONDS);
     }
 
     public void beginTs() {

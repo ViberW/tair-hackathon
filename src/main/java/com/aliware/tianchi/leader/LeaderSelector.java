@@ -2,6 +2,7 @@ package com.aliware.tianchi.leader;
 
 import com.aliware.tianchi.common.*;
 import com.aliyun.tair.tairhash.TairHash;
+import com.aliyun.tair.tairhash.TairHashPipeline;
 import com.aliyun.tair.tairhash.params.ExhsetParams;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPubSub;
@@ -10,11 +11,13 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * @author Viber
  * @version 1.0
- * @apiNote 主节点选择器  适用于集群节点较少, 也不想引入其他额外的中间件
+ * @apiNote 主节点选择器  适用于集群节点较少, 也不想引入其他额外的中间件 -- 这里实现的简单了点
+ * -----------------最好能够有一个能够及时通知的中间件来管理
  * @since 2022/2/25 16:43
  */
 public class LeaderSelector extends AbstractLifeCycle {
@@ -29,19 +32,24 @@ public class LeaderSelector extends AbstractLifeCycle {
     private final String pubsubChannel;
 
     //节点存在redis中的超时时间,单位秒, 需要大于ticketTimeout
-    private int sessionTimeout = 10;
+    private int sessionTimeout = 20;
     //校验节点的是否存在,单位秒
-    private int ticketTimeout = 5;
+    private int ticketTimeout = 10;
 
     private Integer nodeId;
     private volatile boolean master = false;
     //随便些的监听
     private List<LeaderListener> listeners = new CopyOnWriteArrayList<>();
+    private AtomicInteger nodes = new AtomicInteger(0);
 
     public LeaderSelector(JedisPool jedisPool, String name) {
         this.jedisPool = jedisPool;
         this.key = KEY_PREFIX + name;
         this.pubsubChannel = PUBSUB_PREFIX + name;
+    }
+
+    public boolean isMaster() {
+        return master;
     }
 
     @Override
@@ -50,19 +58,11 @@ public class LeaderSelector extends AbstractLifeCycle {
         this.pubSub = new JedisPubSub() {
             @Override
             public void onMessage(String channel, String message) {
-                //节点变化的通知
+                //节点变化的通知: 添加节点不关心
                 String[] split = message.split("@");
-                if ("REMOVE".equals(split[1])) {
+                if ("REMOVE".equals(split[0])) {
                     for (LeaderListener listener : listeners) {
-                        GlobalExecutor.singleExecutor().execute(() -> {
-                            listener.onRemoveNode(master);
-                        });
-                    }
-                } else {
-                    for (LeaderListener listener : listeners) {
-                        GlobalExecutor.singleExecutor().execute(() -> {
-                            listener.onAddNode(master);
-                        });
+                        GlobalExecutor.singleExecutor().execute(listener::onRemoveNode);
                     }
                 }
             }
@@ -84,8 +84,24 @@ public class LeaderSelector extends AbstractLifeCycle {
 
     @Override
     protected void doStop() {
-        TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, nodeId + "@" + "REMOVE"));
         pubSub.unsubscribe(pubsubChannel);
+        if (master) {
+            //删除节点信息
+            TairUtil.poolExecute(jedisPool, jedis -> {
+                TairHashPipeline tairHashPipeline = new TairHashPipeline();
+                tairHashPipeline.setClient(jedis.getClient());
+                tairHashPipeline.exhdel(key, Constants.NODE_LEADER);
+                tairHashPipeline.exhdel(key, String.valueOf(nodeId));
+                tairHashPipeline.sync();
+                return null;
+            });
+        } else {
+            TairUtil.poolExecute(jedisPool, jedis -> {
+                TairHash tairHash = new TairHash(jedis);
+                return tairHash.exhdel(key, String.valueOf(nodeId));
+            });
+        }
+        TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "REMOV@" + nodeId));
     }
 
     /**
@@ -93,10 +109,21 @@ public class LeaderSelector extends AbstractLifeCycle {
      */
     private void registerLeader() {
         if (isStart()) {
-            try {
-                startRegisterLeader();
-            } catch (Exception e) {
-                e.printStackTrace();
+            startRegisterLeader();
+            if (master) {
+                //每隔一段时间检测一次, 主要是非正常关闭的检测, 因为后面有校验, 这里就简单点, 判断数量是否有变化
+                Long len = TairUtil.poolExecute(jedisPool, jedis -> {
+                    TairHash tairHash = new TairHash(jedis);
+                    return tairHash.exhlen(key);
+                });
+                if (len != null && len > 0) {
+                    if (len < nodes.get()) {
+                        for (LeaderListener listener : listeners) {
+                            GlobalExecutor.singleExecutor().execute(listener::onRemoveNode);
+                        }
+                    }
+                    nodes.set(len.intValue());
+                }
             }
             GlobalExecutor.schedule().schedule(this::registerLeader, ticketTimeout, TimeUnit.SECONDS);
         }
@@ -140,25 +167,24 @@ public class LeaderSelector extends AbstractLifeCycle {
     }
 
     /**
-     * 注册节点信息, 这里选取 1024 因为正好能够应对 {雪花算法的工作ID}
+     * 注册节点信息
      */
     private void registerNode() {
         int newNodeId = null == nodeId ? ThreadLocalRandom.current().nextInt(1024) : nodeId;
         do {
-            newNodeId++;
+            newNodeId++;//简单点
             String field = String.valueOf(newNodeId);
             ExhsetParams params = new ExhsetParams();
             params.nx().ex(sessionTimeout);
 
             Long exhset = TairUtil.poolExecute(jedisPool, jedis -> {
                 TairHash tairHash = new TairHash(jedis);
-                return tairHash.exhset(key, field,
-                        String.valueOf(System.currentTimeMillis()), params);
+                return tairHash.exhset(key, field, String.valueOf(System.currentTimeMillis()), params);
             });
             if (null != exhset && exhset >= 0) {
                 System.out.println("success register node:" + newNodeId);
                 nodeId = newNodeId;
-                TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, nodeId + "@" + "ADD"));
+                TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "ADD@" + nodeId));
                 break;
             }
         } while (true);

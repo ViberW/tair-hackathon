@@ -15,6 +15,7 @@ import java.util.concurrent.locks.LockSupport;
  * @author Viber
  * @version 1.0
  * @apiNote 这个对象需要进行释放, 否则定时任务的线程池不断持有
+ * ----- 这里考虑到的节点下线情况就是强制的事项
  * @since 2022/2/22 16:01
  */
 public class TairCountDownLatch {
@@ -59,6 +60,7 @@ public class TairCountDownLatch {
     private void releaseUntil() {
         String s = jedis.get(key);
         if (null == s || "0".equals(s)) {
+            jedis.publish(pubsubChannel, "1");
             releaseThread();
         } else {
             GlobalExecutor.schedule().schedule(this::releaseUntil, 500, TimeUnit.MILLISECONDS);
@@ -85,6 +87,10 @@ public class TairCountDownLatch {
         }
     }
 
+    /**
+     * 因为分布式的场景下, 使用await() 若是在节点下线时, 出现死锁情况, 所以使用await()
+     */
+    @Deprecated
     public void await() {
         while (!release.get()) {
             this.thread = Thread.currentThread();
@@ -92,26 +98,43 @@ public class TairCountDownLatch {
         }
     }
 
+    /**
+     * !!!这里的语义就变成了, 等待多长时间, 若是到达时间点,则强制解锁
+     *
+     * @param timeout 最大容忍时长
+     * @param unit
+     * @return true 代表正常  false 代表强制解锁
+     */
     public boolean await(long timeout, TimeUnit unit) {
+        //强制设置
         long nanosTimeout = unit.toNanos(timeout);
         long deadline = System.nanoTime() + nanosTimeout;
+        boolean ok = true;
         while (!release.get()) {
             this.thread = Thread.currentThread();
             nanosTimeout = deadline - System.nanoTime();
             if (nanosTimeout <= 0) {
-                return false;
-            } else if (nanosTimeout > 1000L) {//spinForTimeoutThreshold
+                ok = false;
+                break;
+            } else if (nanosTimeout > 1000L) {
                 LockSupport.park(nanosTimeout);
             }
-            //todo 添加到队列中去
         }
-        return true;
+        if (!ok) {
+            //强制解锁
+            if (release.compareAndSet(false, true)) {
+                pubSub.unsubscribe(pubsubChannel);
+                jedis.del(key);
+            }
+            jedis.publish(pubsubChannel, "1");
+        }
+        return ok;
     }
 
     private Long tryRelease(int permits) {
         try {
             ExincrbyParams params = new ExincrbyParams();
-            params.min(0);
+            params.xx().min(0);
             return tairString.exincrBy(key, -permits, params);
         } catch (Exception e) {
             if (e.getMessage().contains("increment or decrement would overflow")) {

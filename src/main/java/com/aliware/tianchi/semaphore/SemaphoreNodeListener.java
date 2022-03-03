@@ -1,9 +1,10 @@
 package com.aliware.tianchi.semaphore;
 
-import com.aliware.tianchi.common.AbstractLifeCycle;
 import com.aliware.tianchi.common.GlobalExecutor;
 import com.aliware.tianchi.common.TairUtil;
+import com.aliware.tianchi.common.TimeRecord;
 import com.aliware.tianchi.leader.LeaderListener;
+import com.aliware.tianchi.leader.LeaderSelector;
 import com.aliyun.tair.tairstring.TairString;
 import com.aliyun.tair.tairstring.TairStringPipeline;
 import com.aliyun.tair.tairstring.params.ExsetParams;
@@ -11,6 +12,7 @@ import com.aliyun.tair.tairstring.results.ExgetResult;
 import redis.clients.jedis.JedisPool;
 
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * @author Viber
@@ -18,83 +20,63 @@ import java.util.concurrent.TimeUnit;
  * @apiNote
  * @since 2022/3/3 13:47
  */
-public class SemaphoreNodeListener extends AbstractLifeCycle implements LeaderListener {
+public class SemaphoreNodeListener implements LeaderListener {
 
     private static final String BLOCK_KEY_PREFIX = "_hackathon:_block:semaphore:";
 
     private final JedisPool jedisPool;
     private final TairSemaphore semaphore;
+    private final LeaderSelector selector;
+    private final String blockKey;
+    private final TimeRecord timeRecord;
 
     /**
-     * ts时间计算相关的
-     */
-    private boolean tsCalculate;
-    private TairTsRecord tairTsRecord;
-    /**
-     * 重新构建的超时时间
-     */
-    private volatile long stopTimeout;
-
-    /**
-     * 最多保留时长
+     * 保留延长的时长
      */
     private long maxStopAddition = TimeUnit.SECONDS.toMillis(3);
 
-    public SemaphoreNodeListener(JedisPool jedisPool, TairSemaphore semaphore,
-                                 String key, boolean tsCalculate) {
+    //0: 正常 1-正在处理
+    private AtomicBoolean state = new AtomicBoolean(true);
+
+    public SemaphoreNodeListener(JedisPool jedisPool, TairSemaphore semaphore, LeaderSelector selector,
+                                 TimeRecord timeRecord, String key) {
         this.jedisPool = jedisPool;
         this.semaphore = semaphore;
-        this.tsCalculate = tsCalculate;
-        if (tsCalculate) {
-            tairTsRecord = new TairTsRecord(jedisPool, key);
+        this.selector = selector;
+        this.blockKey = BLOCK_KEY_PREFIX + key;
+        this.timeRecord = timeRecord;
+    }
+
+
+    @Override
+    public void onRemoveNode() {
+        markClusterStop(timeRecord.getTime()); //这里的时间最好能够延迟一定的时间才进行处理并封闭
+        if (selector.isMaster()) {
+            scheduleStop(true);
         }
     }
 
     @Override
-    protected void doStart() {
-        if (tsCalculate) {
-            startTsCalculate();
-        }
-    }
-
-    @Override
-    public void onRemoveNode(boolean leader) {
-        markClusterStop(stopTimeout);
-        if (leader) {
-            startClusterStop();
-            clearRebuild(stopTimeout);
-        }
-    }
-
-    @Override
-    public void onAddNode(boolean leader) {
+    public void onAddNode() {
         //....不做处理
     }
 
     @Override
     public void onBecomeLeader() {
-        Long ttl = TairUtil.poolExecute(jedisPool, jedis -> jedis.ttl(BLOCK_KEY_PREFIX));
-        if (null == ttl || ttl <= 0) {
-            markClusterStop(stopTimeout);
-            startClusterStop();
-            ttl = stopTimeout;
-        } else {
-            ttl = TimeUnit.SECONDS.toMillis(ttl);
-        }
-        clearRebuild(ttl);
+        Boolean exist = TairUtil.poolExecute(jedisPool,
+                jedis -> jedis.exists(blockKey));
+        scheduleStop(exist);
     }
 
-    private void startTsCalculate() {
-        GlobalExecutor.schedule().schedule(() -> {
-            if (isStart()) {
-                // 开启定时任务的计算stopTimeout
-                long l = tairTsRecord.tsCalculate();
-                if (l > 0) {
-                    this.stopTimeout = (stopTimeout + l) / 2 + 500;//追加500ms
-                }
-                startTsCalculate();
-            }
-        }, 10, TimeUnit.SECONDS);
+    private void scheduleStop(Boolean exist) {
+        //先标记好. master已经在处理了
+        if (null == exist || !exist) {
+            markClusterStop(timeRecord.getTime());
+        }
+        if (state.compareAndSet(true, false)) {
+            startClusterStop();
+            clearRebuild(timeRecord.getTime());
+        }
     }
 
     /**
@@ -104,11 +86,10 @@ public class SemaphoreNodeListener extends AbstractLifeCycle implements LeaderLi
      */
     private void markClusterStop(long timeout) {
         ExsetParams params = new ExsetParams();
-        params.nx().px(timeout + maxStopAddition);
-
+        params.nx().px(timeout);
         TairUtil.poolExecute(jedisPool, jedis -> {
             TairString tairString = new TairString(jedis);
-            return tairString.exset(BLOCK_KEY_PREFIX, "1", params);
+            return tairString.exset(blockKey, "1", params);
         });
     }
 
@@ -140,18 +121,20 @@ public class SemaphoreNodeListener extends AbstractLifeCycle implements LeaderLi
                 //说明已经被有重置过了
                 return;
             }
-            ExsetParams params = new ExsetParams();
-            params.xx();
-            TairUtil.poolExecute(jedisPool, jedis -> {
-                TairStringPipeline tairStringPipeline = new TairStringPipeline();
-                tairStringPipeline.setClient(jedis.getClient());
-                tairStringPipeline.exset(semaphore.getKey(), "0", params);
-                tairStringPipeline.del(BLOCK_KEY_PREFIX);
-                tairStringPipeline.sync();
-                return null;
-            });
-            //手动触发一次通知
-            semaphore.pushRelease();
+            if (state.compareAndSet(false, true)) {
+                ExsetParams params = new ExsetParams();
+                params.xx();
+                TairUtil.poolExecute(jedisPool, jedis -> {
+                    TairStringPipeline tairStringPipeline = new TairStringPipeline();
+                    tairStringPipeline.setClient(jedis.getClient());
+                    tairStringPipeline.exset(semaphore.getKey(), "0", params);
+                    tairStringPipeline.del(blockKey);
+                    tairStringPipeline.sync();
+                    return null;
+                });
+                //手动触发一次通知
+                semaphore.pushRelease();
+            }
         }, timeout, TimeUnit.MILLISECONDS);
     }
 
