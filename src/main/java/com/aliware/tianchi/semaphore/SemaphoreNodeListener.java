@@ -63,8 +63,7 @@ public class SemaphoreNodeListener implements LeaderListener {
 
     @Override
     public void onBecomeLeader() {
-        Boolean exist = TairUtil.poolExecute(jedisPool,
-                jedis -> jedis.exists(blockKey));
+        Boolean exist = TairUtil.poolExecute(jedisPool, jedis -> jedis.exists(blockKey));
         scheduleStop(exist);
     }
 

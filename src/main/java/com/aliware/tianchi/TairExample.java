@@ -35,7 +35,7 @@ public class TairExample {
             System.out.println("当前的信号量=====" + atomic.get());
         }, 500, 500, TimeUnit.MILLISECONDS);
         System.out.println("准备启动测试...");
-        endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
+        endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(60);
 
         CountDownLatch countDownLatch = new CountDownLatch(serverCount);
         System.out.println("启动各个服务...");
@@ -69,7 +69,7 @@ public class TairExample {
         selector.start();
         System.out.println(serverId + "服务构建semaphore...");
         TairSemaphore tairSemaphore = new TairSemaphore(selector, jedisPool,
-                "test", 5, TimeUnit.SECONDS.toMillis(5), false);
+                "test", 5, TimeUnit.SECONDS.toMillis(5), true);
         tairSemaphore.start();
         //模拟多线程
         CountDownLatch countDownLatch = new CountDownLatch(threadCount);
