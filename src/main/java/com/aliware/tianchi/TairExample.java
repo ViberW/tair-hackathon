@@ -33,7 +33,7 @@ public class TairExample {
 
     private static void testTairSemaphore() {
         GlobalExecutor.schedule().scheduleWithFixedDelay(() -> {
-            System.out.println("==================" + atomic.get());
+            System.out.println("当前的信号量=====" + atomic.get());
         }, 500, 500, TimeUnit.MILLISECONDS);
         System.out.println("准备启动测试...");
         endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
@@ -86,12 +86,8 @@ public class TairExample {
                     while (System.currentTimeMillis() < randomTime) {
                         tairSemaphore.acquire();
                         try {
-                            if(atomic.get()>5){
-                                System.out.println(1);
-                                Thread.sleep(30000);
-                            }
                             atomic.incrementAndGet();
-                            Thread.sleep(500 + ThreadLocalRandom.current().nextInt(1000));
+                            Thread.sleep(500 + ThreadLocalRandom.current().nextInt(100));
                         } catch (InterruptedException e) {
                             e.printStackTrace();
                         } finally {

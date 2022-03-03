@@ -15,7 +15,8 @@ public abstract class AbstractLifeCycle implements LifeCycle {
         doStart();
     }
 
-    protected abstract void doStart();
+    protected void doStart() {
+    }
 
     @Override
     public void stop() {
@@ -23,7 +24,8 @@ public abstract class AbstractLifeCycle implements LifeCycle {
         doStop();
     }
 
-    protected abstract void doStop();
+    protected void doStop() {
+    }
 
     @Override
     public boolean isStart() {
