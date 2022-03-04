@@ -36,7 +36,7 @@ public class SemaphoreNodeListener implements LeaderListener {
     private long maxStopAddition = TimeUnit.SECONDS.toMillis(3);
 
     //0: 正常 1-正在处理
-    private AtomicBoolean state = new AtomicBoolean(true);
+    private final AtomicBoolean state = new AtomicBoolean(true);
 
     public SemaphoreNodeListener(JedisPool jedisPool, TairSemaphore semaphore, LeaderSelector selector,
                                  TimeRecord timeRecord, String key) {
@@ -50,9 +50,11 @@ public class SemaphoreNodeListener implements LeaderListener {
 
     @Override
     public void onRemoveNode() {
-        markClusterStop(timeRecord.getTime()); //这里的时间最好能够延迟一定的时间才进行处理并封闭
+        markClusterStop(); //这里的时间最好能够延迟一定的时间才进行处理并封闭
         if (selector.isMaster()) {
             scheduleStop(true);
+        } else if (!state.get()) {
+            state.compareAndSet(false, true); //防止意外的断开master注册
         }
     }
 
@@ -70,7 +72,7 @@ public class SemaphoreNodeListener implements LeaderListener {
     private void scheduleStop(Boolean exist) {
         //先标记好. master已经在处理了
         if (null == exist || !exist) {
-            markClusterStop(timeRecord.getTime());
+            markClusterStop();
         }
         if (state.compareAndSet(true, false)) {
             startClusterStop();
@@ -80,10 +82,9 @@ public class SemaphoreNodeListener implements LeaderListener {
 
     /**
      * 标记集群暂停
-     *
-     * @param timeout 超时时间
      */
-    private void markClusterStop(long timeout) {
+    private void markClusterStop() {
+        long timeout = timeRecord.getTime() + maxStopAddition;
         ExsetParams params = new ExsetParams();
         params.nx().px(timeout);
         TairUtil.poolExecute(jedisPool, jedis -> {

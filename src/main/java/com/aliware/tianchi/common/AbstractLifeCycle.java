@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * @since 2022/2/23 9:50
  */
 public abstract class AbstractLifeCycle implements LifeCycle {
-    private AtomicBoolean state = new AtomicBoolean(false);
+    private final AtomicBoolean state = new AtomicBoolean(false);
 
     @Override
     public void start() {

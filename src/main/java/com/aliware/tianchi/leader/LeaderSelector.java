@@ -31,10 +31,14 @@ public class LeaderSelector extends AbstractLifeCycle {
     //pub/sub的通道
     private final String pubsubChannel;
 
-    //节点存在redis中的超时时间,单位秒, 需要大于ticketTimeout
+    //master存在redis中的超时时间,单位秒, 需要大于ticketTimeout
     private int sessionTimeout = 20;
-    //校验节点的是否存在,单位秒
+    //校验节点的是否为master,单位秒
     private int ticketTimeout = 10;
+    //校验节点的是否存在,单位秒
+    private int nodeTimeout = 60;
+    //校验节点的是否存在,单位秒
+    private int nodeTicketTimeout = 30;
 
     private Integer nodeId;
     private volatile boolean master = false;
@@ -170,12 +174,12 @@ public class LeaderSelector extends AbstractLifeCycle {
      * 注册节点信息
      */
     private void registerNode() {
+        //雪花算法 workId范围?
         int newNodeId = null == nodeId ? ThreadLocalRandom.current().nextInt(1024) : nodeId;
         do {
-            newNodeId++;//简单点
             String field = String.valueOf(newNodeId);
             ExhsetParams params = new ExhsetParams();
-            params.nx().ex(sessionTimeout);
+            params.nx().ex(nodeTimeout);
 
             Long exhset = TairUtil.poolExecute(jedisPool, jedis -> {
                 TairHash tairHash = new TairHash(jedis);
@@ -187,6 +191,7 @@ public class LeaderSelector extends AbstractLifeCycle {
                 TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "ADD@" + nodeId));
                 break;
             }
+            newNodeId++;
         } while (true);
         ticketKeepalive();
     }
@@ -198,9 +203,9 @@ public class LeaderSelector extends AbstractLifeCycle {
         if (isStart()) {
             TairUtil.poolExecute(jedisPool, jedis -> {
                 TairHash tairHash = new TairHash(jedisPool.getResource());
-                return tairHash.exhexpire(key, String.valueOf(nodeId), sessionTimeout);
+                return tairHash.exhexpire(key, String.valueOf(nodeId), nodeTimeout);
             });
-            GlobalExecutor.schedule().schedule(this::ticketKeepalive, ticketTimeout, TimeUnit.SECONDS);
+            GlobalExecutor.schedule().schedule(this::ticketKeepalive, nodeTicketTimeout, TimeUnit.SECONDS);
         }
     }
 
