@@ -1,12 +1,21 @@
-package com.aliware.tianchi;
+package com.aliware.tianchi.semaphore;
 
+
+import com.aliware.tianchi.common.CommonUtil;
 import com.aliware.tianchi.common.GlobalExecutor;
 import com.aliware.tianchi.common.NamedThreadFactory;
+import com.aliware.tianchi.common.TairUtil;
 import com.aliware.tianchi.leader.LeaderSelector;
-import com.aliware.tianchi.semaphore.TairSemaphore;
+import org.junit.BeforeClass;
+import org.junit.Test;
+import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPoolConfig;
 
+import javax.annotation.PostConstruct;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
@@ -16,48 +25,46 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @author Viber
  * @version 1.0
  * @apiNote
- * @since 2022/2/16 16:34
+ * @since 2022/3/4 13:19
  */
-public class TairExample {
+public class TairSemaphoreTest {
+
+
     protected static final String HOST = "r-bp1md046fkp6bftstnpd.redis.rds.aliyuncs.com";
     protected static final int PORT = 6379;
     protected static final String PWD = "Wwb843312160";
-
-
-    public static void main(String[] args) throws Exception {
-        testTairSemaphore(5, 6);
-    }
-
-    static long endTime;
-
-    private static void testTairSemaphore(int serverCount, int pieceThreadCount) {
-        GlobalExecutor.schedule().scheduleWithFixedDelay(() -> {
-            System.out.println("当前的信号量=====" + atomic.get());
-        }, 500, 500, TimeUnit.MILLISECONDS);
-        System.out.println("准备启动测试...");
-        endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
-
-        CountDownLatch countDownLatch = new CountDownLatch(serverCount);
-        System.out.println("启动各个服务...");
-        for (int i = 0; i < serverCount; i++) {
-            //模拟多个服务器
-            int serverId = i;
-            factory.newThread(() -> {
-                simulateServer(serverId, pieceThreadCount);
-                countDownLatch.countDown();
-            }).start();
-        }
-        try {
-            countDownLatch.await();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
-        System.out.println("所有服务测试完成...");
-        GlobalExecutor.instance().stop();
-    }
-
+    private static String countKey = "test_000001";
+    protected static JedisPool jedisPool;
     public static AtomicInteger atomic = new AtomicInteger(0);
     static NamedThreadFactory factory = new NamedThreadFactory("test_");
+    static long endTime;
+
+    @BeforeClass
+    public static void setUp() {
+        JedisPoolConfig jedisPoolConfig = new JedisPoolConfig();
+        jedisPoolConfig.setMaxTotal(20);
+        jedisPool = new JedisPool(jedisPoolConfig, HOST, PORT, 60 * 1000, PWD);
+    }
+
+    @Test
+    public void testGetCount() {
+        Jedis jedis = new Jedis(HOST, PORT, 60 * 1000);
+        jedis.auth(PWD);
+        while (true) {
+            CommonUtil.sleep(500);
+            System.out.println("当前count:" + jedis.get(countKey));
+        }
+    }
+
+    @Test
+    public void testSemaphore() {
+        endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(
+                30 + ThreadLocalRandom.current().nextInt(30));
+        System.out.println("准备启动测试..." + now());
+        simulateServer(1, 3);
+        System.out.println("所有服务测试完成..." + now());
+        GlobalExecutor.instance().stop();
+    }
 
     //模拟服务器
     private static void simulateServer(int serverId, int threadCount) {
@@ -84,7 +91,13 @@ public class TairExample {
                         tairSemaphore.acquire();
                         try {
                             atomic.incrementAndGet();
+                            TairUtil.poolExecute(jedisPool, jedis -> {
+                                return jedis.incr(countKey);
+                            });
                             Thread.sleep(100 + ThreadLocalRandom.current().nextInt(400));
+                            TairUtil.poolExecute(jedisPool, jedis -> {
+                                return jedis.decr(countKey);
+                            });
                         } catch (InterruptedException e) {
                             e.printStackTrace();
                         } finally {
@@ -109,5 +122,15 @@ public class TairExample {
         tairSemaphore.stop();
         System.out.println(serverId + "集群选择器暂停...");
         selector.stop();
+    }
+
+    public static String now() {
+        String result = "";
+        try {
+            DateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+            result = dateFormat.format(new Date());
+        } catch (Exception e) {
+        }
+        return result;
     }
 }

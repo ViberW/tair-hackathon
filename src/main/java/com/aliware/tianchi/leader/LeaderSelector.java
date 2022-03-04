@@ -65,8 +65,14 @@ public class LeaderSelector extends AbstractLifeCycle {
                 //节点变化的通知: 添加节点不关心
                 String[] split = message.split("@");
                 if ("REMOVE".equals(split[0])) {
+                    nodes.decrementAndGet();
                     for (LeaderListener listener : listeners) {
                         GlobalExecutor.singleExecutor().execute(listener::onRemoveNode);
+                    }
+                } else {
+                    nodes.incrementAndGet();
+                    for (LeaderListener listener : listeners) {
+                        GlobalExecutor.singleExecutor().execute(listener::onAddNode);
                     }
                 }
             }

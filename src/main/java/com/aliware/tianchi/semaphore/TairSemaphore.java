@@ -164,30 +164,34 @@ public class TairSemaphore extends AbstractLifeCycle {
         }
     }
 
+    public boolean tryAcquire(long timeout, TimeUnit unit) {
+        return tryAcquire(1, timeout, unit);
+    }
+
     public boolean tryAcquire(int permits, long timeout, TimeUnit unit) {
         long nanosTimeout = unit.toNanos(timeout);
         long deadline = System.nanoTime() + nanosTimeout;
         if (!tryAcquire(permits)) {
             WaitNode waitNode = new WaitNode(Thread.currentThread());
-            waitNode.release.set(true);
             waitQueue.offer(waitNode);
-            boolean ret = false;
-            for (; !(ret = tryAcquire(permits)); ) {
+            for (; ; ) {
+                WaitNode head = waitQueue.peek();
+                if (waitNode == head && tryAcquire(permits)) {
+                    waitQueue.poll();
+                    break;
+                }
                 nanosTimeout = deadline - System.nanoTime();
                 if (nanosTimeout <= 0) {
                     waitQueue.remove(waitNode);//其实这里最好能够实现prev和next, 实现快速移除
                     return false;
-                } else if (nanosTimeout > 1000L) {//spinForTimeoutThreshold
-                    WaitNode head = waitQueue.peek();
-                    if (waitNode == head && tryAcquire(permits)) {
-                        waitQueue.poll();
-                        return true;
-                    }
+                } else if(nanosTimeout > 1000L){//spinForTimeoutThreshold
                     waitNode.release.set(false);
                     LockSupport.park(nanosTimeout);
                 }
             }
-            return ret;
+        }
+        if (tsCalculate) {
+            tairTsRecord.beginTs();
         }
         return true;
     }
@@ -246,6 +250,11 @@ public class TairSemaphore extends AbstractLifeCycle {
 
         public WaitNode(Thread thread) {
             this.thread = thread;
+        }
+
+        public WaitNode(Thread thread, boolean defaultState) {
+            this.thread = thread;
+            this.release.set(defaultState);
         }
     }
 
