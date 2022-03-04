@@ -37,6 +37,7 @@ public class GlobalExecutor extends AbstractLifeCycle {
                 new NamedThreadFactory("global-single-executor-"));
         this.scheduledExecutor = new ScheduledThreadPoolExecutor(thread,
                 new NamedThreadFactory("global-schedule-"));
+        this.start();
     }
 
     @Override

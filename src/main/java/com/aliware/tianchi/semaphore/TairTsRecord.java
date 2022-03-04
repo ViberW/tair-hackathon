@@ -60,18 +60,13 @@ public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
 
     private void startTsCalculate() {
         GlobalExecutor.schedule().schedule(() -> {
-            System.out.println("current_calculate_time11111111111111: " + isStart());
             if (isStart()) {
                 //就简单计算了
-                try {
-                    long l = this.tsCalculate();
-                    if (l > 0) {
-                        this.stopTimeout = (stopTimeout + l) / 2 + 500;//追加500ms
-                    }
-                    System.out.println("current_calculate_time: " + stopTimeout);
-                } catch (Exception e) {
-                    e.printStackTrace();
+                long l = this.tsCalculate();
+                if (l > 0) {
+                    this.stopTimeout = (stopTimeout + l) / 2 + 500;//追加500ms
                 }
+                System.out.println("current_calculate_time: " + stopTimeout);
                 startTsCalculate();
             }
         }, 10, TimeUnit.SECONDS);//这个时间可以弄成自定义
