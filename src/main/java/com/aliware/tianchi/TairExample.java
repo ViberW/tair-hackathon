@@ -35,7 +35,7 @@ public class TairExample {
             System.out.println("当前的信号量=====" + atomic.get());
         }, 500, 500, TimeUnit.MILLISECONDS);
         System.out.println("准备启动测试...");
-        endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(60);
+        endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
 
         CountDownLatch countDownLatch = new CountDownLatch(serverCount);
         System.out.println("启动各个服务...");

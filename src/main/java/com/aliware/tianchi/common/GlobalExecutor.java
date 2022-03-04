@@ -1,5 +1,6 @@
 package com.aliware.tianchi.common;
 
+import java.util.List;
 import java.util.concurrent.*;
 
 /**
@@ -45,7 +46,9 @@ public class GlobalExecutor extends AbstractLifeCycle {
 
     @Override
     protected void doStop() {
-        singleExecutor.shutdownNow();
-        scheduledExecutor.shutdownNow();
+        List<Runnable> runnables = scheduledExecutor.shutdownNow();
+        System.out.println("scheduledExecutor:" + runnables.size());
+        runnables = singleExecutor.shutdownNow();
+        System.out.println("singleExecutor:" + runnables.size());
     }
 }

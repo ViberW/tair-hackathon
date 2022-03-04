@@ -13,6 +13,7 @@ import redis.clients.jedis.JedisPool;
 
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * @author Viber
@@ -33,7 +34,8 @@ public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
 
     //记录缓存的时间
     private long tsDateEt = TimeUnit.SECONDS.toMillis(10);
-    private long tsInterval = 15; //每16秒的一次数据
+    private long tsInterval = 40;//每40毫秒统计 = 10000/256
+    private AtomicLong expectTime = new AtomicLong(System.currentTimeMillis());
     /**
      * 重新构建的超时时间
      */
@@ -58,13 +60,18 @@ public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
 
     private void startTsCalculate() {
         GlobalExecutor.schedule().schedule(() -> {
+            System.out.println("current_calculate_time11111111111111: " + isStart());
             if (isStart()) {
                 //就简单计算了
-                long l = this.tsCalculate();
-                if (l > 0) {
-                    this.stopTimeout = (stopTimeout + l) / 2 + 500;//追加500ms
+                try {
+                    long l = this.tsCalculate();
+                    if (l > 0) {
+                        this.stopTimeout = (stopTimeout + l) / 2 + 500;//追加500ms
+                    }
+                    System.out.println("current_calculate_time: " + stopTimeout);
+                } catch (Exception e) {
+                    e.printStackTrace();
                 }
-                System.out.println("current_calculate_time: " + stopTimeout);
                 startTsCalculate();
             }
         }, 10, TimeUnit.SECONDS);//这个时间可以弄成自定义
@@ -78,16 +85,22 @@ public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
         Long time = BEGIN_TIME_LOCAL.get();
         if (null != time) {
             long current = System.currentTimeMillis();
-            current = current - (current & tsInterval);
-            long duration = current - time;
-            ExtsAttributesParams params = new ExtsAttributesParams();
-            params.dataEt(tsDateEt).uncompressed();
-            //这里若相同时 则直接覆盖吧
-            String skey = String.valueOf(current);
-            TairUtil.poolExecute(jedisPool, jedis -> {
-                TairTs tairTs = new TairTs(jedis);
-                return tairTs.extsadd(TS_PKEY, tsTimeKey, skey, duration, params);
-            });
+            long l = expectTime.get();
+            if (current >= l && expectTime.compareAndSet(l, l + tsInterval)) {
+                long duration = current - time;
+                ExtsAttributesParams params = new ExtsAttributesParams();
+                params.dataEt(tsDateEt).uncompressed();
+                //这里若相同时 则直接覆盖吧
+                String skey = String.valueOf(current);
+                try {
+                    TairUtil.poolExecute(jedisPool, jedis -> {
+                        TairTs tairTs = new TairTs(jedis);
+                        return tairTs.extsadd(TS_PKEY, tsTimeKey, skey, duration, params);
+                    });
+                } catch (Exception e) {
+                    //相同timestamp的错误忽略
+                }
+            }
         }
     }
 
@@ -106,15 +119,14 @@ public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
             return tairTs.extsrange(TS_PKEY, tsTimeKey, String.valueOf(fromTs),
                     String.valueOf(toTs), paramsAgg);
         });
+        if (null == extsSkeyResult) {
+            return 0;
+        }
         List<ExtsDataPointResult> dataPoints = extsSkeyResult.getDataPoints();
         if (null == dataPoints || dataPoints.isEmpty()) {
             return 0;
         }
-        double avg = dataPoints.get(0).getDoubleValue();
-        if (avg == 0) {
-            return 0;
-        }
-        return (long) avg;
+        return (long) dataPoints.get(0).getDoubleValue();
     }
 
 }

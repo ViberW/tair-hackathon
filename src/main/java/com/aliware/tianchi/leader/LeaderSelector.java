@@ -202,7 +202,7 @@ public class LeaderSelector extends AbstractLifeCycle {
     private void ticketKeepalive() {
         if (isStart()) {
             TairUtil.poolExecute(jedisPool, jedis -> {
-                TairHash tairHash = new TairHash(jedisPool.getResource());
+                TairHash tairHash = new TairHash(jedis);
                 return tairHash.exhexpire(key, String.valueOf(nodeId), nodeTimeout);
             });
             GlobalExecutor.schedule().schedule(this::ticketKeepalive, nodeTicketTimeout, TimeUnit.SECONDS);

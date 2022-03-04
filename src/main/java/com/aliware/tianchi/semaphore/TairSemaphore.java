@@ -51,18 +51,6 @@ public class TairSemaphore extends AbstractLifeCycle {
     private boolean tsCalculate;
     private TairTsRecord tairTsRecord;
 
-    public String getKey() {
-        return key;
-    }
-
-    public int getMaxPermits() {
-        return maxPermits;
-    }
-
-    public void pushRelease() {
-        TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "1"));
-    }
-
     /**
      * @param selector    分布式下的leader选择器
      * @param jedisPool   jedis
@@ -94,9 +82,6 @@ public class TairSemaphore extends AbstractLifeCycle {
 
     @Override
     protected void doStart() {
-        if (this.tsCalculate) {
-            tairTsRecord.start();
-        }
         CommonUtil.pubsubThread(() -> {
             TairUtil.poolExecute(jedisPool, jedis -> {
                 jedis.subscribe(pubSub, pubsubChannel);
@@ -106,16 +91,19 @@ public class TairSemaphore extends AbstractLifeCycle {
         while (!pubSub.isSubscribed()) {
             CommonUtil.sleep(0);
         }
+        if (this.tsCalculate) {
+            tairTsRecord.start();
+        }
         selector.registerListener(listener);
     }
 
     @Override
     protected void doStop() {
+        selector.unRegisterListener(listener);
         if (this.tsCalculate) {
             tairTsRecord.stop();
         }
         pubSub.unsubscribe(pubsubChannel);
-        selector.unRegisterListener(listener);
     }
 
     private void notifyNode() {
@@ -141,6 +129,18 @@ public class TairSemaphore extends AbstractLifeCycle {
      * 下面为调用方法
      * ******************************************
      */
+    public String getKey() {
+        return key;
+    }
+
+    public int getMaxPermits() {
+        return maxPermits;
+    }
+
+    public void pushRelease() {
+        TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "1"));
+    }
+
     public void acquire() {
         acquire(1);
     }
@@ -164,17 +164,30 @@ public class TairSemaphore extends AbstractLifeCycle {
         }
     }
 
-    //todo 添加超时的检测的任务
     public boolean tryAcquire(int permits, long timeout, TimeUnit unit) {
         long nanosTimeout = unit.toNanos(timeout);
         long deadline = System.nanoTime() + nanosTimeout;
-        while (!isStart()) {
-            nanosTimeout = deadline - System.nanoTime();
-            if (nanosTimeout <= 0) {
-                return false;
-            } else if (nanosTimeout > 1000L) {//spinForTimeoutThreshold
-                LockSupport.park(nanosTimeout);
+        if (!tryAcquire(permits)) {
+            WaitNode waitNode = new WaitNode(Thread.currentThread());
+            waitNode.release.set(true);
+            waitQueue.offer(waitNode);
+            boolean ret = false;
+            for (; !(ret = tryAcquire(permits)); ) {
+                nanosTimeout = deadline - System.nanoTime();
+                if (nanosTimeout <= 0) {
+                    waitQueue.remove(waitNode);//其实这里最好能够实现prev和next, 实现快速移除
+                    return false;
+                } else if (nanosTimeout > 1000L) {//spinForTimeoutThreshold
+                    WaitNode head = waitQueue.peek();
+                    if (waitNode == head && tryAcquire(permits)) {
+                        waitQueue.poll();
+                        return true;
+                    }
+                    waitNode.release.set(false);
+                    LockSupport.park(nanosTimeout);
+                }
             }
+            return ret;
         }
         return true;
     }
@@ -185,7 +198,7 @@ public class TairSemaphore extends AbstractLifeCycle {
 
     public void release(int permits) {
         if (tryRelease(permits)) {
-            TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "1"));
+            pushRelease();
             if (tsCalculate) {//记录执行耗时
                 tairTsRecord.endTs();
             }
