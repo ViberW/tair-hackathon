@@ -46,9 +46,7 @@ public class GlobalExecutor extends AbstractLifeCycle {
 
     @Override
     protected void doStop() {
-        List<Runnable> runnables = scheduledExecutor.shutdownNow();
-        System.out.println("scheduledExecutor:" + runnables.size());
-        runnables = singleExecutor.shutdownNow();
-        System.out.println("singleExecutor:" + runnables.size());
+        scheduledExecutor.shutdownNow();
+        singleExecutor.shutdownNow();
     }
 }
