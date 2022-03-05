@@ -2,8 +2,9 @@ package com.aliware.tianchi.semaphore;
 
 import com.aliware.tianchi.common.AbstractLifeCycle;
 import com.aliware.tianchi.common.CommonUtil;
-import com.aliware.tianchi.common.ConstTimeRecord;
 import com.aliware.tianchi.common.TairUtil;
+import com.aliware.tianchi.common.recorder.ConstTimeRecorder;
+import com.aliware.tianchi.common.recorder.TimeRecorder;
 import com.aliware.tianchi.leader.LeaderSelector;
 import com.aliyun.tair.tairstring.TairString;
 import com.aliyun.tair.tairstring.params.ExincrbyParams;
@@ -45,11 +46,7 @@ public class TairSemaphore extends AbstractLifeCycle {
 
     private LeaderSelector selector;
 
-    /**
-     * ts时间计算相关的
-     */
-    private boolean tsCalculate;
-    private TairTsRecord tairTsRecord;
+    private TimeRecorder timeRecorder;
 
     /**
      * @param selector    分布式下的leader选择器
@@ -66,9 +63,7 @@ public class TairSemaphore extends AbstractLifeCycle {
         this.key = KEY_PREFIX + key;
         this.pubsubChannel = PUBSUB_PREFIX + key;
         this.maxPermits = permits;
-        if (this.tsCalculate = tsCalculate) {
-            tairTsRecord = new TairTsRecord(jedisPool, key, timeOut);
-        }
+        timeRecorder = tsCalculate ? new TairTsRecorder(jedisPool, key, timeOut) : new ConstTimeRecorder(timeOut);
         //监听pub/sub消息, 获取到消息则将头部的消息取出,并进行处理, 变更状态有变化, 通过cas进行变更通知, 唤醒第一个线程
         this.pubSub = new JedisPubSub() {
             @Override
@@ -76,8 +71,7 @@ public class TairSemaphore extends AbstractLifeCycle {
                 notifyNode();
             }
         };
-        this.listener = new SemaphoreNodeListener(jedisPool, this, selector,
-                tsCalculate ? tairTsRecord : new ConstTimeRecord(timeOut), key);
+        this.listener = new SemaphoreNodeListener(jedisPool, this, selector, timeRecorder, key);
     }
 
     @Override
@@ -91,18 +85,14 @@ public class TairSemaphore extends AbstractLifeCycle {
         while (!pubSub.isSubscribed()) {
             CommonUtil.sleep(0);
         }
-        if (this.tsCalculate) {
-            tairTsRecord.start();
-        }
+        timeRecorder.start();
         selector.registerListener(listener);
     }
 
     @Override
     protected void doStop() {
         selector.unRegisterListener(listener);
-        if (this.tsCalculate) {
-            tairTsRecord.stop();
-        }
+        timeRecorder.stop();
         pubSub.unsubscribe(pubsubChannel);
     }
 
@@ -159,9 +149,7 @@ public class TairSemaphore extends AbstractLifeCycle {
                 LockSupport.park();
             }
         }
-        if (tsCalculate) {
-            tairTsRecord.beginTs();
-        }
+        timeRecorder.beginRecord();
     }
 
     public boolean tryAcquire(long timeout, TimeUnit unit) {
@@ -184,15 +172,13 @@ public class TairSemaphore extends AbstractLifeCycle {
                 if (nanosTimeout <= 0) {
                     waitQueue.remove(waitNode);//其实这里最好能够实现prev和next, 实现快速移除
                     return false;
-                } else if(nanosTimeout > 1000L){//spinForTimeoutThreshold
+                } else if (nanosTimeout > 1000L) {//spinForTimeoutThreshold
                     waitNode.release.set(false);
                     LockSupport.park(nanosTimeout);
                 }
             }
         }
-        if (tsCalculate) {
-            tairTsRecord.beginTs();
-        }
+        timeRecorder.beginRecord();
         return true;
     }
 
@@ -201,11 +187,12 @@ public class TairSemaphore extends AbstractLifeCycle {
     }
 
     public void release(int permits) {
-        if (tryRelease(permits)) {
-            pushRelease();
-            if (tsCalculate) {//记录执行耗时
-                tairTsRecord.endTs();
+        try {
+            if (tryRelease(permits)) {
+                pushRelease();
             }
+        } finally {
+            timeRecorder.endRecord();
         }
     }
 
@@ -227,6 +214,12 @@ public class TairSemaphore extends AbstractLifeCycle {
     }
 
     private boolean tryRelease(int permits) {
+        Long time = timeRecorder.beginTime();
+        //防止因节点断开, 重置信号量,但部分请求并未及时完成处理, 导致超出信号量控制, 甚至也可以考虑epoch,
+        // 但因为有执行耗时的统计, 就仍然使用获取时间
+        if (time < listener.preParkTime()) {
+            return true;
+        }
         try {
             ExincrbyParams params = new ExincrbyParams();
             params.min(0);

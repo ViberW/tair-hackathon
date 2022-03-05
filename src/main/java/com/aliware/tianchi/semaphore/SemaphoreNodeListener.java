@@ -2,7 +2,7 @@ package com.aliware.tianchi.semaphore;
 
 import com.aliware.tianchi.common.GlobalExecutor;
 import com.aliware.tianchi.common.TairUtil;
-import com.aliware.tianchi.common.TimeRecord;
+import com.aliware.tianchi.common.recorder.TimeRecorder;
 import com.aliware.tianchi.leader.LeaderListener;
 import com.aliware.tianchi.leader.LeaderSelector;
 import com.aliyun.tair.tairstring.TairString;
@@ -13,6 +13,7 @@ import redis.clients.jedis.JedisPool;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * @author Viber
@@ -28,7 +29,7 @@ public class SemaphoreNodeListener implements LeaderListener {
     private final TairSemaphore semaphore;
     private final LeaderSelector selector;
     private final String blockKey;
-    private final TimeRecord timeRecord;
+    private final TimeRecorder timeRecorder;
 
     /**
      * 保留延长的时长
@@ -37,14 +38,15 @@ public class SemaphoreNodeListener implements LeaderListener {
 
     //0: 正常 1-正在处理
     private final AtomicBoolean state = new AtomicBoolean(true);
+    private final AtomicLong preTime = new AtomicLong(0);
 
     public SemaphoreNodeListener(JedisPool jedisPool, TairSemaphore semaphore, LeaderSelector selector,
-                                 TimeRecord timeRecord, String key) {
+                                 TimeRecorder timeRecorder, String key) {
         this.jedisPool = jedisPool;
         this.semaphore = semaphore;
         this.selector = selector;
         this.blockKey = BLOCK_KEY_PREFIX + key;
-        this.timeRecord = timeRecord;
+        this.timeRecorder = timeRecorder;
     }
 
 
@@ -56,6 +58,7 @@ public class SemaphoreNodeListener implements LeaderListener {
         } else if (!state.get()) {
             state.compareAndSet(false, true); //防止意外的断开master注册
         }
+        preTime.set(System.currentTimeMillis());
     }
 
     @Override
@@ -69,6 +72,10 @@ public class SemaphoreNodeListener implements LeaderListener {
         scheduleStop(exist);
     }
 
+    public Long preParkTime() {
+        return preTime.get();
+    }
+
     private void scheduleStop(Boolean exist) {
         //先标记好. master已经在处理了
         if (null == exist || !exist) {
@@ -76,7 +83,7 @@ public class SemaphoreNodeListener implements LeaderListener {
         }
         if (state.compareAndSet(true, false)) {
             startClusterStop();
-            clearRebuild(timeRecord.getTime());
+            clearRebuild(timeRecorder.calculate());
         }
     }
 
@@ -84,7 +91,7 @@ public class SemaphoreNodeListener implements LeaderListener {
      * 标记集群暂停
      */
     private void markClusterStop() {
-        long timeout = timeRecord.getTime() + maxStopAddition;
+        long timeout = timeRecorder.calculate() + maxStopAddition;
         ExsetParams params = new ExsetParams();
         params.nx().px(timeout);
         TairUtil.poolExecute(jedisPool, jedis -> {

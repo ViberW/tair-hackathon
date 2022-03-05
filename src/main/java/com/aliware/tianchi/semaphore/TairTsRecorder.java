@@ -1,9 +1,8 @@
 package com.aliware.tianchi.semaphore;
 
-import com.aliware.tianchi.common.AbstractLifeCycle;
 import com.aliware.tianchi.common.GlobalExecutor;
 import com.aliware.tianchi.common.TairUtil;
-import com.aliware.tianchi.common.TimeRecord;
+import com.aliware.tianchi.common.recorder.AbstractTimeRecorder;
 import com.aliyun.tair.tairts.TairTs;
 import com.aliyun.tair.tairts.params.ExtsAggregationParams;
 import com.aliyun.tair.tairts.params.ExtsAttributesParams;
@@ -21,13 +20,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * @apiNote
  * @since 2022/3/3 13:36
  */
-public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
+public class TairTsRecorder extends AbstractTimeRecorder {
 
     private static final String TS_PKEY = "_ts:ts:pkey";
     private static final String TS_S_TIME_KEY_PREFIX = "s_time:";
-
-    //用于ts计算时间的
-    private static ThreadLocal<Long> BEGIN_TIME_LOCAL = new ThreadLocal<>();
 
     private final JedisPool jedisPool;
     private final String tsTimeKey;
@@ -42,14 +38,14 @@ public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
     private volatile long stopTimeout;
 
 
-    public TairTsRecord(JedisPool jedisPool, String key, long stopTimeout) {
+    public TairTsRecorder(JedisPool jedisPool, String key, long stopTimeout) {
         this.jedisPool = jedisPool;
         tsTimeKey = TS_S_TIME_KEY_PREFIX + key;
         this.stopTimeout = stopTimeout;
     }
 
     @Override
-    public long getTime() {
+    public long calculate() {
         return stopTimeout;
     }
 
@@ -72,12 +68,10 @@ public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
         }, 10, TimeUnit.SECONDS);//这个时间可以弄成自定义
     }
 
-    public void beginTs() {
-        BEGIN_TIME_LOCAL.set(System.currentTimeMillis());
-    }
 
-    public void endTs() {
-        Long time = BEGIN_TIME_LOCAL.get();
+    @Override
+    public void doEndRecord() {
+        Long time = this.TIME_RECORD_LOCAL.get();
         if (null != time) {
             long current = System.currentTimeMillis();
             long l = expectTime.get();
@@ -97,6 +91,7 @@ public class TairTsRecord extends AbstractLifeCycle implements TimeRecord {
                 }
             }
         }
+        super.endRecord();
     }
 
     /**
