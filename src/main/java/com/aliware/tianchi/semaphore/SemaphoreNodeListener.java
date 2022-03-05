@@ -52,13 +52,13 @@ public class SemaphoreNodeListener implements LeaderListener {
 
     @Override
     public void onRemoveNode() {
+        preTime.set(System.currentTimeMillis());
         markClusterStop(); //这里的时间最好能够延迟一定的时间才进行处理并封闭
         if (selector.isMaster()) {
             scheduleStop(true);
         } else if (!state.get()) {
             state.compareAndSet(false, true); //防止意外的断开master注册
         }
-        preTime.set(System.currentTimeMillis());
     }
 
     @Override

@@ -216,7 +216,7 @@ public class TairSemaphore extends AbstractLifeCycle {
     private boolean tryRelease(int permits) {
         Long time = timeRecorder.beginTime();
         //防止因节点断开, 重置信号量,但部分请求并未及时完成处理, 导致超出信号量控制, 甚至也可以考虑epoch,
-        // 但因为有执行耗时的统计, 就仍然使用获取时间
+        // 但因为有执行耗时的统计, 就仍然使用获取时间, 因为小于当前时间的, 后续都会重置信号量
         if (time < listener.preParkTime()) {
             return true;
         }
