@@ -108,7 +108,7 @@ public class LeaderSelector extends AbstractLifeCycle {
                 return tairHash.exhdel(key, String.valueOf(nodeId));
             });
         }
-        TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "REMOV@" + nodeId));
+        TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "REMOVE@" + nodeId));
     }
 
     /**
