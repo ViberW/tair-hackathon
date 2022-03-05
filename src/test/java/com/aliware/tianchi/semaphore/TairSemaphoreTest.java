@@ -12,7 +12,6 @@ import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPoolConfig;
 
-import javax.annotation.PostConstruct;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -59,7 +58,7 @@ public class TairSemaphoreTest {
     @Test
     public void testSemaphore() {
         endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(
-                30 + ThreadLocalRandom.current().nextInt(30));
+                60 + ThreadLocalRandom.current().nextInt(30));
         System.out.println("准备启动测试..." + now());
         simulateServer(1, 3);
         System.out.println("所有服务测试完成..." + now());
@@ -94,6 +93,7 @@ public class TairSemaphoreTest {
                             TairUtil.poolExecute(jedisPool, jedis -> {
                                 return jedis.incr(countKey);
                             });
+                            System.out.println(">>>>>>> 获取信号并执行处理....");
                             Thread.sleep(100 + ThreadLocalRandom.current().nextInt(400));
                             TairUtil.poolExecute(jedisPool, jedis -> {
                                 return jedis.decr(countKey);

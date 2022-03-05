@@ -83,9 +83,6 @@ public class LeaderSelector extends AbstractLifeCycle {
                 return null;
             });
         }).start();
-        while (!pubSub.isSubscribed()) {
-            CommonUtil.sleep(0);
-        }
         //注册节点的信息
         registerNode();
         //这里一开始判断是否有主节点在, 并尝试注册主节点
@@ -143,26 +140,24 @@ public class LeaderSelector extends AbstractLifeCycle {
      * 争抢master或延续master的超时时间
      */
     private void startRegisterLeader() {
-        String value = TairUtil.poolExecute(jedisPool, jedis -> {
-            TairHash tairHash = new TairHash(jedis);
-            return tairHash.exhget(key, Constants.NODE_LEADER);
-        });
         if (!master) {
-            if (null == value) { //说明暂时没有leader注册
-                ExhsetParams params = new ExhsetParams();
-                params.nx().ex(sessionTimeout);
-                Long exhset = TairUtil.poolExecute(jedisPool, jedis -> {
-                    TairHash tairHash = new TairHash(jedis);
-                    return tairHash.exhset(key, Constants.NODE_LEADER, String.valueOf(nodeId), params);
-                });
-                if (null != exhset && exhset == 1) { //设置成功
-                    master = true;
-                    for (LeaderListener listener : listeners) {
-                        GlobalExecutor.singleExecutor().execute(listener::onBecomeLeader);
-                    }
+            ExhsetParams params = new ExhsetParams();
+            params.nx().ex(sessionTimeout);
+            Long exhset = TairUtil.poolExecute(jedisPool, jedis -> {
+                TairHash tairHash = new TairHash(jedis);
+                return tairHash.exhset(key, Constants.NODE_LEADER, String.valueOf(nodeId), params);
+            });
+            if (null != exhset && exhset == 1) { //设置成功
+                master = true;
+                for (LeaderListener listener : listeners) {
+                    GlobalExecutor.singleExecutor().execute(listener::onBecomeLeader);
                 }
             }
         } else {
+            String value = TairUtil.poolExecute(jedisPool, jedis -> {
+                TairHash tairHash = new TairHash(jedis);
+                return tairHash.exhget(key, Constants.NODE_LEADER);
+            });
             //延续时间 ,担心因为网络或系统原因, 加时操作被延长而节点变更
             if (null == value || !value.equals(String.valueOf(nodeId))) {
                 master = false;

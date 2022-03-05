@@ -7,14 +7,18 @@ import com.aliware.tianchi.common.recorder.ConstTimeRecorder;
 import com.aliware.tianchi.common.recorder.TimeRecorder;
 import com.aliware.tianchi.leader.LeaderSelector;
 import com.aliyun.tair.tairstring.TairString;
+import com.aliyun.tair.tairstring.TairStringPipeline;
 import com.aliyun.tair.tairstring.params.ExincrbyParams;
+import com.aliyun.tair.tairstring.params.ExsetParams;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPubSub;
 
-import java.util.concurrent.LinkedBlockingQueue;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.AbstractQueuedSynchronizer;
 
 /**
  * @author Viber
@@ -22,9 +26,12 @@ import java.util.concurrent.locks.LockSupport;
  * @apiNote 这里都是非公平的, 若是想要公平, 则需要使用redis-list保存,就不去实现了
  * -----
  * 有区别于单系统, 这里分布式系统中若是节点的下线 会造成permits不可用, 需要定时重新构建permits
+ * <p>
+ * >>> {@link com.aliware.tianchi.semaphore.bak.TairSemaphoreBak} 这个是最初版本的简单实现AQS, 目前尽量换成AQS
  * @since 2022/2/22 15:28
  */
 public class TairSemaphore extends AbstractLifeCycle {
+
 
     private static final String KEY_PREFIX = "_hackathon:semaphore:";
     private static final String PUBSUB_PREFIX = "_pubsub:semaphore:";
@@ -34,10 +41,7 @@ public class TairSemaphore extends AbstractLifeCycle {
     private final String key;
     //pub/sub的通道
     private final String pubsubChannel;
-    //最大申请量
-    private final int maxPermits;
     //使用一个本地的queue
-    private LinkedBlockingQueue<WaitNode> waitQueue = new LinkedBlockingQueue<>();
     private JedisPubSub pubSub;
     /**
      * 时间处理监听器
@@ -47,6 +51,7 @@ public class TairSemaphore extends AbstractLifeCycle {
     private LeaderSelector selector;
 
     private TimeRecorder timeRecorder;
+    private Sync sync;
 
     /**
      * @param selector    分布式下的leader选择器
@@ -62,13 +67,18 @@ public class TairSemaphore extends AbstractLifeCycle {
         this.jedisPool = jedisPool;
         this.key = KEY_PREFIX + key;
         this.pubsubChannel = PUBSUB_PREFIX + key;
-        this.maxPermits = permits;
-        timeRecorder = tsCalculate ? new TairTsRecorder(jedisPool, key, timeOut) : new ConstTimeRecorder(timeOut);
+        this.timeRecorder = tsCalculate ? new TairTsRecorder(jedisPool, key, timeOut) : new ConstTimeRecorder(timeOut);
+        this.sync = new NonfairSync(jedisPool, timeRecorder, this.key, permits);
+
         //监听pub/sub消息, 获取到消息则将头部的消息取出,并进行处理, 变更状态有变化, 通过cas进行变更通知, 唤醒第一个线程
         this.pubSub = new JedisPubSub() {
             @Override
             public void onMessage(String channel, String message) {
-                notifyNode();
+                try {
+                    shardMethod.invoke(sync);
+                } catch (IllegalAccessException | InvocationTargetException e) {
+                    e.printStackTrace();
+                }
             }
         };
         this.listener = new SemaphoreNodeListener(jedisPool, this, selector, timeRecorder, key);
@@ -82,9 +92,6 @@ public class TairSemaphore extends AbstractLifeCycle {
                 return null;
             });
         }).start();
-        while (!pubSub.isSubscribed()) {
-            CommonUtil.sleep(0);
-        }
         timeRecorder.start();
         selector.registerListener(listener);
     }
@@ -96,23 +103,114 @@ public class TairSemaphore extends AbstractLifeCycle {
         pubSub.unsubscribe(pubsubChannel);
     }
 
-    private void notifyNode() {
-        WaitNode node;
-        while ((node = waitQueue.peek()) != null) {
-            if (node.release.get()) {
-                return;
-            }
-            //这里是不是需要等待呢?
-            if (node.release.compareAndSet(false, true)) {
-                //防止并发情况下, 直接将当前给释放掉了
-                LockSupport.unpark(node.thread);
-                if (node.thread.isInterrupted()) {
-                    continue;
+    //////////////////Sync类//////////////////
+
+    static abstract class Sync extends AbstractQueuedSynchronizer {
+        private static final long serialVersionUID = 1192457210091910900L;
+
+        final int maxPermits;
+        final JedisPool jedisPool;
+        final String key;
+        final TimeRecorder timeRecorder;
+
+        Sync(JedisPool jedisPool, TimeRecorder timeRecorder, String key, int permits) {
+            this.jedisPool = jedisPool;
+            this.timeRecorder = timeRecorder;
+            this.key = key;
+            this.maxPermits = permits;
+        }
+
+        final int getPermits() {
+            return TairUtil.poolExecute(jedisPool, jedis -> {
+                String value = jedis.get(key);
+                if (value == null) {
+                    return 0;
                 }
-                return;
+                return Integer.valueOf(value);
+            });
+        }
+
+        final int nonfairTryAcquireShared(int acquires) {
+            try {
+                ExincrbyParams params = new ExincrbyParams();
+                params.max(maxPermits);
+                int ret = (int) (maxPermits - TairUtil.poolExecute(jedisPool, jedis -> {
+                    TairString tairString = new TairString(jedis);
+                    return tairString.exincrBy(key, acquires, params);
+                }));
+                timeRecorder.beginRecord();
+                return ret;
+            } catch (Exception e) {
+                if (e.getMessage().contains("increment or decrement would overflow")) {
+                    return -1;
+                }
+                throw e;
             }
         }
+
+        protected final boolean tryReleaseShared(int releases) {
+            try {
+                ExincrbyParams params = new ExincrbyParams();
+                params.min(0);
+                TairUtil.poolExecute(jedisPool, jedis -> {
+                    TairString tairString = new TairString(jedis);
+                    return tairString.exincrBy(key, -releases, params);
+                });
+                timeRecorder.beginRecord();
+                return true;
+            } catch (Exception e) {
+                if (e.getMessage().contains("increment or decrement would overflow")) {
+                    return false;
+                }
+                throw new Error("Maximum permit count exceeded", e);
+            }
+        }
+
+        final void reducePermits(int reductions) {
+            try {
+                ExincrbyParams params = new ExincrbyParams();
+                params.min(0);
+                TairUtil.poolExecute(jedisPool, jedis -> {
+                    TairString tairString = new TairString(jedis);
+                    return tairString.exincrBy(key, -reductions, params);
+                });
+            } catch (Exception e) {
+                if (e.getMessage().contains("increment or decrement would overflow")) {
+                    throw new Error("Permit count underflow");
+                }
+                throw new Error(e);
+            }
+        }
+
+        final int drainPermits() {
+            return TairUtil.poolExecute(jedisPool, jedis -> {
+                TairStringPipeline tairStringPipeline = new TairStringPipeline();
+                tairStringPipeline.setClient(jedis.getClient());
+                ExsetParams params = new ExsetParams();
+                params.xx();
+                tairStringPipeline.get(key);
+                tairStringPipeline.exset(key, "0", params);
+                List<Object> objects = tairStringPipeline.syncAndReturnAll();
+                return Integer.valueOf(String.valueOf(objects.get(0)));
+            });
+        }
     }
+
+    /**
+     * 非公平版本
+     */
+    static final class NonfairSync extends Sync {
+        private static final long serialVersionUID = -2694183684443567898L;
+
+        NonfairSync(JedisPool jedisPool, TimeRecorder timeRecorder, String key, int permits) {
+            super(jedisPool, timeRecorder, key, permits);
+        }
+
+        protected int tryAcquireShared(int acquires) {
+            return nonfairTryAcquireShared(acquires);
+        }
+    }
+    //////////////////////////////////////////////////////
 
     /**
      * ******************************************
@@ -124,62 +222,55 @@ public class TairSemaphore extends AbstractLifeCycle {
     }
 
     public int getMaxPermits() {
-        return maxPermits;
+        return sync.maxPermits;
     }
 
     public void pushRelease() {
         TairUtil.poolExecute(jedisPool, jedis -> jedis.publish(pubsubChannel, "1"));
     }
 
-    public void acquire() {
-        acquire(1);
+
+    public void acquire() throws InterruptedException {
+        sync.acquireSharedInterruptibly(1);
     }
 
-    public void acquire(int permits) {
-        if (!tryAcquire(permits)) {
-            WaitNode waitNode = new WaitNode(Thread.currentThread());
-            waitQueue.offer(waitNode);
-            for (; ; ) {
-                WaitNode head = waitQueue.peek();
-                if (waitNode == head && tryAcquire(permits)) {
-                    waitQueue.poll();
-                    break;
-                }
-                waitNode.release.set(false);
-                LockSupport.park();
-            }
+    public void acquireUninterruptibly() {
+        sync.acquireShared(1);
+    }
+
+    public boolean tryAcquire() {
+        return sync.nonfairTryAcquireShared(1) >= 0;
+    }
+
+    public boolean tryAcquire(long timeout, TimeUnit unit)
+            throws InterruptedException {
+        return sync.tryAcquireSharedNanos(1, unit.toNanos(timeout));
+    }
+
+
+    public void acquire(int permits) throws InterruptedException {
+        if (permits < 0) throw new IllegalArgumentException();
+        sync.acquireSharedInterruptibly(permits);
+    }
+
+    public void acquireUninterruptibly(int permits) {
+        if (permits < 0) throw new IllegalArgumentException();
+        sync.acquireShared(permits);
+    }
+
+    public boolean tryAcquire(int permits) {
+        if (permits < 0) throw new IllegalArgumentException();
+        return sync.nonfairTryAcquireShared(permits) >= 0;
+    }
+
+    public boolean tryAcquire(int permits, long timeout, TimeUnit unit)
+            throws InterruptedException {
+        if (permits < 0) throw new IllegalArgumentException();
+        boolean ret = sync.tryAcquireSharedNanos(permits, unit.toNanos(timeout));
+        if (ret) {
+            timeRecorder.beginRecord();
         }
-        timeRecorder.beginRecord();
-    }
-
-    public boolean tryAcquire(long timeout, TimeUnit unit) {
-        return tryAcquire(1, timeout, unit);
-    }
-
-    public boolean tryAcquire(int permits, long timeout, TimeUnit unit) {
-        long nanosTimeout = unit.toNanos(timeout);
-        long deadline = System.nanoTime() + nanosTimeout;
-        if (!tryAcquire(permits)) {
-            WaitNode waitNode = new WaitNode(Thread.currentThread());
-            waitQueue.offer(waitNode);
-            for (; ; ) {
-                WaitNode head = waitQueue.peek();
-                if (waitNode == head && tryAcquire(permits)) {
-                    waitQueue.poll();
-                    break;
-                }
-                nanosTimeout = deadline - System.nanoTime();
-                if (nanosTimeout <= 0) {
-                    waitQueue.remove(waitNode);//其实这里最好能够实现prev和next, 实现快速移除
-                    return false;
-                } else if (nanosTimeout > 1000L) {//spinForTimeoutThreshold
-                    waitNode.release.set(false);
-                    LockSupport.park(nanosTimeout);
-                }
-            }
-        }
-        timeRecorder.beginRecord();
-        return true;
+        return ret;
     }
 
     public void release() {
@@ -187,68 +278,65 @@ public class TairSemaphore extends AbstractLifeCycle {
     }
 
     public void release(int permits) {
+        if (permits < 0) throw new IllegalArgumentException();
         try {
-            if (tryRelease(permits)) {
-                pushRelease();
+            Long time = timeRecorder.beginTime();
+            //防止因节点断开, 重置信号量,但部分请求并未及时完成处理, 导致超出信号量控制, 甚至也可以考虑epoch,
+            // 但因为有执行耗时的统计, 就仍然使用获取时间, 因为小于当前时间的, 后续都会重置信号量
+            if (time < listener.preParkTime()) {
+                return;
             }
+            sync.releaseShared(permits);
+            pushRelease();//pubsub消息通知
         } finally {
             timeRecorder.endRecord();
         }
     }
 
-    public boolean tryAcquire(int permits) {
+    public int availablePermits() {
+        return sync.getPermits();
+    }
+
+    public int drainPermits() {
+        return sync.drainPermits();
+    }
+
+    protected void reducePermits(int reduction) {
+        if (reduction < 0) throw new IllegalArgumentException();
+        sync.reducePermits(reduction);
+    }
+
+    public boolean isFair() {
+        return false;
+    }
+
+    public final boolean hasQueuedThreads() {
+        return sync.hasQueuedThreads();
+    }
+
+    public final int getQueueLength() {
+        return sync.getQueueLength();
+    }
+
+    protected Collection<Thread> getQueuedThreads() {
+        return sync.getQueuedThreads();
+    }
+
+    public String toString() {
+        return super.toString() + "[Permits = " + sync.getPermits() + "]";
+    }
+
+
+    private static final Method shardMethod;
+
+    static {
+        Class<AbstractQueuedSynchronizer> clazz = AbstractQueuedSynchronizer.class;
         try {
-            ExincrbyParams params = new ExincrbyParams();
-            params.max(maxPermits);
-            TairUtil.poolExecute(jedisPool, jedis -> {
-                TairString tairString = new TairString(jedis);
-                return tairString.exincrBy(key, permits, params);
-            });
-            return true;
-        } catch (Exception e) {
-            if (e.getMessage().contains("increment or decrement would overflow")) {
-                return false;
-            }
-            throw e;
+            Method method = clazz.getDeclaredMethod("doReleaseShared");
+            method.setAccessible(true);
+            shardMethod = method;
+        } catch (NoSuchMethodException e) {
+            throw new Error(e);
         }
     }
-
-    private boolean tryRelease(int permits) {
-        Long time = timeRecorder.beginTime();
-        //防止因节点断开, 重置信号量,但部分请求并未及时完成处理, 导致超出信号量控制, 甚至也可以考虑epoch,
-        // 但因为有执行耗时的统计, 就仍然使用获取时间, 因为小于当前时间的, 后续都会重置信号量
-        if (time < listener.preParkTime()) {
-            return true;
-        }
-        try {
-            ExincrbyParams params = new ExincrbyParams();
-            params.min(0);
-            TairUtil.poolExecute(jedisPool, jedis -> {
-                TairString tairString = new TairString(jedis);
-                return tairString.exincrBy(key, -permits, params);
-            });
-            return true;
-        } catch (Exception e) {
-            System.out.println("error!!!!!!!" + e.getMessage());
-            if (e.getMessage().contains("increment or decrement would overflow")) {
-                return false;
-            }
-            throw e;
-        }
-    }
-
-    static class WaitNode {
-        private volatile Thread thread;
-        private AtomicBoolean release = new AtomicBoolean(false);
-
-        public WaitNode(Thread thread) {
-            this.thread = thread;
-        }
-
-        public WaitNode(Thread thread, boolean defaultState) {
-            this.thread = thread;
-            this.release.set(defaultState);
-        }
-    }
-
 }

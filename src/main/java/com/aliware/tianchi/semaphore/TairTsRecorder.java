@@ -65,7 +65,7 @@ public class TairTsRecorder extends AbstractTimeRecorder {
                 System.out.println("current_calculate_time: " + stopTimeout);
                 startTsCalculate();
             }
-        }, 10, TimeUnit.SECONDS);//这个时间可以弄成自定义
+        }, 5, TimeUnit.SECONDS);//这个时间可以弄成自定义
     }
 
 
@@ -91,7 +91,6 @@ public class TairTsRecorder extends AbstractTimeRecorder {
                 }
             }
         }
-        super.endRecord();
     }
 
     /**
