@@ -58,7 +58,7 @@ public class TairSemaphoreTest {
     @Test
     public void testSemaphore() {
         endTime = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(
-                60 + ThreadLocalRandom.current().nextInt(30));
+                30 + ThreadLocalRandom.current().nextInt(30));
         System.out.println("准备启动测试..." + now());
         simulateServer(1, 3);
         System.out.println("所有服务测试完成..." + now());
@@ -79,14 +79,13 @@ public class TairSemaphoreTest {
         tairSemaphore.start();
         //模拟多线程
         CountDownLatch countDownLatch = new CountDownLatch(threadCount);
-        long randomTime = endTime + ThreadLocalRandom.current().nextInt(3) * TimeUnit.SECONDS.toMillis(5);
         System.out.println(serverId + "服务构建==开始任务处理..............");
         for (int i = 0; i < threadCount; i++) {
             int threadId = i;
             factory.newThread(() -> {
                 try {
                     //执行处理
-                    while (System.currentTimeMillis() < randomTime) {
+                    while (System.currentTimeMillis() < endTime) {
                         tairSemaphore.acquire();
                         try {
                             atomic.incrementAndGet();

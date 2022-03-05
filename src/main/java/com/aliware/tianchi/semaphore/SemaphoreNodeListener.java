@@ -140,6 +140,7 @@ public class SemaphoreNodeListener implements LeaderListener {
                     return null;
                 });
                 //手动触发一次通知
+                System.out.println("重新调整信号量>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
                 semaphore.pushRelease();
             }
         }, timeout, TimeUnit.MILLISECONDS);
